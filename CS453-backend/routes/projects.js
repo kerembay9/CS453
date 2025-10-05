@@ -1,0 +1,174 @@
+// routes.js
+const express = require("express");
+const { exec } = require("child_process");
+const { promisify } = require("util");
+const fs = require("fs");
+const fsp = require("fs/promises");
+const path = require("path");
+const multer = require("multer");
+const axios = require("axios");
+const NodeFormData = require("form-data");
+
+const router = express.Router();
+const execAsync = promisify(exec);
+
+// -----------------------------
+// Config
+// -----------------------------
+const PROJECTS_DIR = path.join(__dirname, "../projects"); // ✅ ensure defined
+const UPLOADS_DIR = path.join(__dirname, "../uploads");
+
+const N8N_WEBHOOK_URL =
+  process.env.N8N_WEBHOOK_URL ||
+  "http://localhost:5678/webhook/ec52a91a-54e0-47a2-afa3-f191c87c7043"; // ✅ normal webhook (not -test)
+
+// Ensure base dirs exist
+async function ensureDirs() {
+  await fsp.mkdir(PROJECTS_DIR, { recursive: true });
+  await fsp.mkdir(UPLOADS_DIR, { recursive: true });
+}
+ensureDirs().catch(console.error);
+
+// -----------------------------
+// Multer (temp storage)
+// -----------------------------
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+    filename: (_req, file, cb) => cb(null, file.originalname),
+  }),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+});
+
+// -----------------------------
+// Helpers
+// -----------------------------
+function sanitizeName(s) {
+  return String(s)
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 128);
+}
+async function moveFile(src, dest) {
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  await fsp.rename(src, dest);
+}
+
+// -----------------------------
+// Clone repository
+// -----------------------------
+router.post("/clone-repo", express.json(), async (req, res) => {
+  try {
+    const { repoUrl, repoName } = req.body || {};
+    if (!repoUrl || !repoName) {
+      return res.status(400).json({ error: "Missing repoUrl or repoName" });
+    }
+    await ensureDirs();
+    const repoPath = path.join(PROJECTS_DIR, repoName);
+    if (fs.existsSync(repoPath)) {
+      return res.status(400).json({ error: "Repository already exists" });
+    }
+    await execAsync(`git clone ${repoUrl} "${repoPath}"`);
+    res.json({ success: true, message: "Repository cloned successfully" });
+  } catch (error) {
+    console.error("clone-repo error:", error);
+    res.status(500).json({ error: "Failed to clone repository" });
+  }
+});
+
+// -----------------------------
+// List projects
+// -----------------------------
+router.get("/", async (_req, res) => {
+  try {
+    await ensureDirs();
+    const all = await fsp.readdir(PROJECTS_DIR, { withFileTypes: true });
+    const projects = all.filter((d) => d.isDirectory()).map((d) => d.name);
+    res.json({ projects });
+  } catch (err) {
+    console.error("list projects error:", err);
+    res.json({ projects: [] });
+  }
+});
+
+// -----------------------------
+// Delete project
+// -----------------------------
+router.delete("/", express.json(), async (req, res) => {
+  const { projectName } = req.body || {};
+  if (!projectName)
+    return res.status(400).json({ error: "Missing projectName" });
+
+  const projectPath = path.join(PROJECTS_DIR, projectName);
+  if (!fs.existsSync(projectPath)) {
+    return res.status(404).json({ error: "Project not found" });
+  }
+  try {
+    await execAsync(`rm -rf "${projectPath}"`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("delete error:", error);
+    res.status(500).json({ error: "Failed to delete project" });
+  }
+});
+
+// -----------------------------
+// Upload audio → forward to n8n
+// If mounted at app.use("/api", router), path is /api/upload-audio
+// -----------------------------
+router.post("/upload-audio", upload.single("audio"), async (req, res) => {
+  const projectNameRaw = req.body?.projectName;
+  const file = req.file;
+
+  if (!file || !projectNameRaw) {
+    if (file?.path) {
+      try {
+        await fsp.unlink(file.path);
+      } catch {}
+    }
+    return res.status(400).json({ error: "Missing file or project name" });
+  }
+
+  const projectName = sanitizeName(projectNameRaw);
+  const projectPath = path.join(PROJECTS_DIR, projectName);
+  const finalPath = path.join(projectPath, file.originalname);
+
+  try {
+    await moveFile(file.path, finalPath);
+
+    // ✅ Use *package* FormData that accepts Node streams
+    const form = new NodeFormData();
+    form.append("audio", fs.createReadStream(finalPath), {
+      filename: path.basename(finalPath),
+      contentType: "audio/mpeg", // change if not mp3
+    });
+    form.append("projectName", projectName);
+
+    const webhookResponse = await fetch(
+      "http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043",
+      {
+        method: "POST",
+        body: form,
+        headers: form.getHeaders(),
+      }
+    );
+
+    const webhookData = await webhookResponse.json();
+
+    return res.json({
+      success: true,
+      message: "Audio processed by ElevenLabs",
+      webhookResponse: webhookData,
+    });
+  } catch (err) {
+    console.error("Upload/forward error:", err?.response?.data || err);
+    const status = err?.response?.status || 502;
+    const details = err?.response?.data || String(err);
+    return res.status(status).json({
+      error: "Failed to forward audio to n8n",
+      status,
+      details,
+    });
+  }
+});
+
+module.exports = router;
