@@ -20,7 +20,7 @@ const UPLOADS_DIR = path.join(__dirname, "../uploads");
 
 const N8N_WEBHOOK_URL =
   process.env.N8N_WEBHOOK_URL ||
-  "http://localhost:5678/webhook/ec52a91a-54e0-47a2-afa3-f191c87c7043"; // ✅ normal webhook (not -test)
+  "http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043"; // ✅ normal webhook (not -test)
 
 // Ensure base dirs exist
 async function ensureDirs() {
@@ -135,7 +135,7 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
   try {
     await moveFile(file.path, finalPath);
 
-    // ✅ Use *package* FormData that accepts Node streams
+    // Use axios instead of fetch for better FormData support
     const form = new NodeFormData();
     form.append("audio", fs.createReadStream(finalPath), {
       filename: path.basename(finalPath),
@@ -143,16 +143,35 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
     });
     form.append("projectName", projectName);
 
-    const webhookResponse = await fetch(
+    console.log("FormData created with:", {
+      audioFile: path.basename(finalPath),
+      projectName: projectName,
+      contentType: "audio/mpeg",
+    });
+
+    const webhookResponse = await axios.post(
       "http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043",
+      form,
       {
-        method: "POST",
-        body: form,
-        headers: form.getHeaders(),
+        headers: {
+          ...form.getHeaders(),
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
       }
     );
 
-    const webhookData = await webhookResponse.json();
+    let webhookData = webhookResponse.data;
+    console.log("Webhook response:", webhookData);
+
+    if (webhookResponse.status < 200 || webhookResponse.status >= 300) {
+      return res.status(webhookResponse.status).json({
+        error: "Webhook request failed",
+        status: webhookResponse.status,
+        statusText: webhookResponse.statusText,
+        webhookResponse: webhookData,
+      });
+    }
 
     return res.json({
       success: true,
