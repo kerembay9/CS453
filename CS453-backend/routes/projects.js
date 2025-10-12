@@ -8,6 +8,7 @@ const path = require("path");
 const multer = require("multer");
 const axios = require("axios");
 const NodeFormData = require("form-data");
+const { dbHelpers } = require("../db");
 
 const router = express.Router();
 const execAsync = promisify(exec);
@@ -135,6 +136,13 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
   try {
     await moveFile(file.path, finalPath);
 
+    // Create database record for the audio file
+    const audioFileId = await dbHelpers.insertAudioFile(
+      projectName,
+      file.originalname,
+      finalPath
+    );
+
     // Use axios instead of fetch for better FormData support
     const form = new NodeFormData();
     form.append("audio", fs.createReadStream(finalPath), {
@@ -142,10 +150,12 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
       contentType: "audio/mpeg", // change if not mp3
     });
     form.append("projectName", projectName);
+    form.append("audioFileId", audioFileId.toString()); // Include ID for webhook callback
 
     console.log("FormData created with:", {
       audioFile: path.basename(finalPath),
       projectName: projectName,
+      audioFileId: audioFileId,
       contentType: "audio/mpeg",
     });
 
@@ -161,10 +171,12 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
       }
     );
 
-    let webhookData = webhookResponse.data;
+    const webhookData = webhookResponse.data;
     console.log("Webhook response:", webhookData);
 
     if (webhookResponse.status < 200 || webhookResponse.status >= 300) {
+      // Update status to failed if webhook fails
+      await dbHelpers.updateTranscription(audioFileId, null, "failed");
       return res.status(webhookResponse.status).json({
         error: "Webhook request failed",
         status: webhookResponse.status,
@@ -173,9 +185,47 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
       });
     }
 
+    // Check if webhook returned transcription result immediately
+    let transcriptionText = null;
+    let finalStatus = "processing";
+
+    if (typeof webhookData === "string" && webhookData.trim()) {
+      // If webhook returns a string, treat it as transcription
+      transcriptionText = webhookData.trim();
+      finalStatus = "completed";
+    } else if (webhookData && typeof webhookData === "object") {
+      // If webhook returns an object, look for transcription field
+      transcriptionText =
+        webhookData.transcription || webhookData.text || webhookData.result;
+      if (transcriptionText) {
+        finalStatus = "completed";
+      }
+    }
+
+    // Update database with transcription result if available
+    if (transcriptionText) {
+      await dbHelpers.updateTranscription(
+        audioFileId,
+        transcriptionText,
+        finalStatus
+      );
+      console.log(
+        `Transcription completed immediately for audio file ${audioFileId}:`,
+        {
+          status: finalStatus,
+          hasTranscription: !!transcriptionText,
+        }
+      );
+    }
+
     return res.json({
       success: true,
-      message: "Audio processed by ElevenLabs",
+      message: transcriptionText
+        ? "Audio uploaded and transcription completed"
+        : "Audio uploaded and processing started",
+      audioFileId: audioFileId,
+      transcription: transcriptionText,
+      status: finalStatus,
       webhookResponse: webhookData,
     });
   } catch (err) {
@@ -187,6 +237,121 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
       status,
       details,
     });
+  }
+});
+
+// -----------------------------
+// N8N Webhook Callback for Transcription Results
+// -----------------------------
+router.post(
+  "/webhook/transcription-complete",
+  express.json(),
+  async (req, res) => {
+    try {
+      const { audioFileId, transcriptionText, status, error } = req.body;
+
+      if (!audioFileId) {
+        return res.status(400).json({ error: "Missing audioFileId" });
+      }
+
+      // Update the database record with transcription results
+      const finalStatus =
+        status || (transcriptionText ? "completed" : "failed");
+      const finalTranscription =
+        transcriptionText || (error ? `Error: ${error}` : null);
+
+      const changes = await dbHelpers.updateTranscription(
+        audioFileId,
+        finalTranscription,
+        finalStatus
+      );
+
+      if (changes === 0) {
+        return res.status(404).json({ error: "Audio file not found" });
+      }
+
+      console.log(`Transcription completed for audio file ${audioFileId}:`, {
+        status: finalStatus,
+        hasTranscription: !!finalTranscription,
+      });
+
+      res.json({
+        success: true,
+        message: "Transcription result updated",
+        audioFileId,
+        status: finalStatus,
+      });
+    } catch (error) {
+      console.error("Webhook callback error:", error);
+      res.status(500).json({ error: "Failed to update transcription result" });
+    }
+  }
+);
+
+// -----------------------------
+// Audio Files Management Endpoints
+// -----------------------------
+
+// Get all audio files for a project
+router.get("/audio-files/:projectName", async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    const audioFiles = await dbHelpers.getAudioFilesByProject(projectName);
+    res.json({ audioFiles });
+  } catch (error) {
+    console.error("Get audio files error:", error);
+    res.status(500).json({ error: "Failed to get audio files" });
+  }
+});
+
+// Get specific audio file by ID
+router.get("/audio-file/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const audioFile = await dbHelpers.getAudioFileById(id);
+
+    if (!audioFile) {
+      return res.status(404).json({ error: "Audio file not found" });
+    }
+
+    res.json({ audioFile });
+  } catch (error) {
+    console.error("Get audio file error:", error);
+    res.status(500).json({ error: "Failed to get audio file" });
+  }
+});
+
+// Delete audio file
+router.delete("/audio-file/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get file info before deleting from database
+    const audioFile = await dbHelpers.getAudioFileById(id);
+    if (!audioFile) {
+      return res.status(404).json({ error: "Audio file not found" });
+    }
+
+    // Delete from database
+    const changes = await dbHelpers.deleteAudioFile(id);
+
+    // Delete physical file
+    try {
+      if (fs.existsSync(audioFile.file_path)) {
+        await fsp.unlink(audioFile.file_path);
+      }
+    } catch (fileError) {
+      console.warn("Failed to delete physical file:", fileError);
+    }
+
+    res.json({
+      success: true,
+      message: "Audio file deleted",
+      deletedId: id,
+    });
+  } catch (error) {
+    console.error("Delete audio file error:", error);
+    res.status(500).json({ error: "Failed to delete audio file" });
   }
 });
 
