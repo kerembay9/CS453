@@ -516,15 +516,17 @@ Format each todo as JSON:
 Return only a JSON array of todos.`;
 
     // Execute Continue.dev CLI command
-    const continueCommand = `cn -p "${prompt.replace(
+    // Change to project directory first, then run the command
+    const continueCommand = `cd "${projectPath}" && cn -p "${prompt.replace(
       /"/g,
       '\\"'
-    )}" --codebase "${projectPath}"`;
+    )}"`;
 
     console.log("Executing Continue.dev command:", continueCommand);
     const { stdout, stderr } = await execAsync(continueCommand, {
       timeout: 30000, // 30 second timeout
       maxBuffer: 1024 * 1024, // 1MB buffer
+      cwd: projectPath, // Set working directory to project path
     });
 
     if (stderr) {
@@ -722,14 +724,12 @@ ${todo.project_name}
 Return only "VALID" if the code is syntactically correct and follows good practices, or "INVALID" with a brief explanation if there are issues.`;
 
     const projectPath = path.join(PROJECTS_DIR, todo.project_name);
-    const continueCommand = `cn -p "${prompt.replace(
-      /"/g,
-      '\\"'
-    )}" --codebase "${projectPath}"`;
+    const continueCommand = `cn -p "${prompt.replace(/"/g, '\\"')}"`;
 
     const { stdout } = await execAsync(continueCommand, {
       timeout: 15000,
       maxBuffer: 1024 * 1024,
+      cwd: projectPath, // Set working directory to project path
     });
 
     const isValid = stdout.trim().toUpperCase().startsWith("VALID");
@@ -776,14 +776,12 @@ ${todo.project_name}
 Return only "CORRECT" if the code correctly implements the described functionality, or "INCORRECT" with a brief explanation if there are logical issues.`;
 
     const projectPath = path.join(PROJECTS_DIR, todo.project_name);
-    const continueCommand = `continue --headless --prompt "${prompt.replace(
-      /"/g,
-      '\\"'
-    )}" --codebase "${projectPath}"`;
+    const continueCommand = `cn -p "${prompt.replace(/"/g, '\\"')}"`;
 
     const { stdout } = await execAsync(continueCommand, {
       timeout: 15000,
       maxBuffer: 1024 * 1024,
+      cwd: projectPath, // Set working directory to project path
     });
 
     const isCorrect = stdout.trim().toUpperCase().startsWith("CORRECT");
