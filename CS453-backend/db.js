@@ -73,6 +73,7 @@ db.serialize(() => {
       project_name TEXT NOT NULL,
       git_commit_hash TEXT,
       executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reverted BOOLEAN DEFAULT 0,
       FOREIGN KEY (todo_id) REFERENCES todos (id) ON DELETE CASCADE
     )
   `,
@@ -81,6 +82,19 @@ db.serialize(() => {
         console.error("Error creating execution_history table:", err.message);
       } else {
         console.log("Execution history table ready");
+        // Add reverted column if it doesn't exist (for existing databases)
+        db.run(
+          `ALTER TABLE execution_history ADD COLUMN reverted BOOLEAN DEFAULT 0`,
+          (alterErr) => {
+            // Ignore error if column already exists
+            if (alterErr && !alterErr.message.includes("duplicate column")) {
+              console.warn(
+                "Note: reverted column may already exist:",
+                alterErr.message
+              );
+            }
+          }
+        );
       }
     }
   );
@@ -107,9 +121,51 @@ db.serialize(() => {
   `,
     (err) => {
       if (err) {
-        console.error("Error creating execution_iterations table:", err.message);
+        console.error(
+          "Error creating execution_iterations table:",
+          err.message
+        );
       } else {
         console.log("Execution iterations table ready");
+      }
+    }
+  );
+
+  // Create settings table for application configuration
+  db.run(
+    `
+    CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      value TEXT NOT NULL,
+      description TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `,
+    (err) => {
+      if (err) {
+        console.error("Error creating settings table:", err.message);
+      } else {
+        console.log("Settings table ready");
+        // Initialize default settings
+        db.run(
+          `INSERT OR IGNORE INTO settings (key, value, description) VALUES 
+            ('max_retries', '3', 'Maximum number of retry attempts for code execution'),
+            ('continue_api_key', '', 'Continue.dev API key (Gemini/Gemini API key)'),
+            ('continue_timeout', '30000', 'Timeout for Continue.dev commands in milliseconds'),
+            ('file_upload_limit_mb', '100', 'Maximum file upload size in megabytes'),
+            ('n8n_webhook_url', 'http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043', 'N8N webhook URL for integrations')`,
+          (initErr) => {
+            if (initErr) {
+              console.error(
+                "Error initializing default settings:",
+                initErr.message
+              );
+            } else {
+              console.log("Default settings initialized");
+            }
+          }
+        );
       }
     }
   );
@@ -399,8 +455,54 @@ const dbHelpers = {
     });
   },
 
+  updateExecutionHistory: (id, updates) => {
+    return new Promise((resolve, reject) => {
+      const fields = [];
+      const values = [];
+
+      Object.keys(updates).forEach((key) => {
+        if (updates[key] !== undefined) {
+          fields.push(`${key} = ?`);
+          values.push(updates[key]);
+        }
+      });
+
+      if (fields.length === 0) {
+        resolve(0);
+        return;
+      }
+
+      values.push(id);
+
+      const stmt = db.prepare(
+        `UPDATE execution_history SET ${fields.join(", ")} WHERE id = ?`
+      );
+
+      stmt.run(values, function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes);
+        }
+      });
+
+      stmt.finalize();
+    });
+  },
+
   // Execution iterations helper functions
-  insertExecutionIteration: (executionHistoryId, todoId, iterationNumber, command, errorMessage, errorStdout, errorStderr, llmSuggestion, appliedFix, status) => {
+  insertExecutionIteration: (
+    executionHistoryId,
+    todoId,
+    iterationNumber,
+    command,
+    errorMessage,
+    errorStdout,
+    errorStderr,
+    llmSuggestion,
+    appliedFix,
+    status
+  ) => {
     return new Promise((resolve, reject) => {
       const stmt = db.prepare(`
         INSERT INTO execution_iterations (
@@ -411,7 +513,18 @@ const dbHelpers = {
       `);
 
       stmt.run(
-        [executionHistoryId, todoId, iterationNumber, command, errorMessage, errorStdout, errorStderr, llmSuggestion, appliedFix, status],
+        [
+          executionHistoryId,
+          todoId,
+          iterationNumber,
+          command,
+          errorMessage,
+          errorStdout,
+          errorStderr,
+          llmSuggestion,
+          appliedFix,
+          status,
+        ],
         function (err) {
           if (err) {
             reject(err);
@@ -454,6 +567,85 @@ const dbHelpers = {
           }
         }
       );
+    });
+  },
+
+  // Settings helper functions
+  getSetting: (key) => {
+    return new Promise((resolve, reject) => {
+      db.get("SELECT * FROM settings WHERE key = ?", [key], (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row);
+        }
+      });
+    });
+  },
+
+  getAllSettings: () => {
+    return new Promise((resolve, reject) => {
+      db.all("SELECT * FROM settings ORDER BY key", [], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  },
+
+  updateSetting: (key, value, description = null) => {
+    return new Promise((resolve, reject) => {
+      const stmt = db.prepare(`
+        INSERT INTO settings (key, value, description, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          description = COALESCE(excluded.description, description),
+          updated_at = CURRENT_TIMESTAMP
+      `);
+
+      stmt.run([key, value, description], function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes);
+        }
+      });
+
+      stmt.finalize();
+    });
+  },
+
+  updateSettings: (settings) => {
+    return new Promise((resolve, reject) => {
+      const stmt = db.prepare(`
+        INSERT INTO settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = CURRENT_TIMESTAMP
+      `);
+
+      const promises = Object.entries(settings).map(([key, value]) => {
+        return new Promise((res, rej) => {
+          stmt.run([key, String(value)], function (err) {
+            if (err) rej(err);
+            else res(this.changes);
+          });
+        });
+      });
+
+      Promise.all(promises)
+        .then(() => {
+          stmt.finalize();
+          resolve();
+        })
+        .catch((err) => {
+          stmt.finalize();
+          reject(err);
+        });
     });
   },
 };
