@@ -18,6 +18,7 @@ const execAsync = promisify(exec);
 // -----------------------------
 const PROJECTS_DIR = path.join(__dirname, "../projects"); // ✅ ensure defined
 const UPLOADS_DIR = path.join(__dirname, "../uploads");
+const CONTINUE_CONFIG_PATH = path.join(__dirname, "../config.yaml"); // Local Continue.dev config
 
 const N8N_WEBHOOK_URL =
   process.env.N8N_WEBHOOK_URL ||
@@ -516,21 +517,90 @@ Format each todo as JSON:
 Return only a JSON array of todos.`;
 
     // Execute Continue.dev CLI command
-    // Change to project directory first, then run the command
-    const continueCommand = `cd "${projectPath}" && cn -p "${prompt.replace(
+    // Use local config.yaml file
+    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
       /"/g,
       '\\"'
     )}"`;
 
     console.log("Executing Continue.dev command:", continueCommand);
-    const { stdout, stderr } = await execAsync(continueCommand, {
-      timeout: 30000, // 30 second timeout
-      maxBuffer: 1024 * 1024, // 1MB buffer
-      cwd: projectPath, // Set working directory to project path
-    });
+    let stdout, stderr;
+    try {
+      const result = await execAsync(continueCommand, {
+        timeout: 30000, // 30 second timeout
+        maxBuffer: 1024 * 1024, // 1MB buffer
+        cwd: projectPath, // Set working directory to project path
+        env: {
+          ...process.env, // Pass all environment variables including CONTINUE_API_KEY
+        },
+      });
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (execError) {
+      // Check for Continue.dev API authentication errors
+      const errorOutput =
+        execError.stdout || execError.stderr || execError.message || "";
+      const errorString = JSON.stringify(errorOutput);
+      const errorText = String(errorOutput);
+
+      // Try to parse JSON error messages
+      let parsedError = null;
+      try {
+        // Try parsing the error output directly
+        parsedError = JSON.parse(errorText);
+      } catch {
+        try {
+          // Try parsing if it's nested in a message field
+          const messageMatch = errorText.match(/"message"\s*:\s*"([^"]+)"/);
+          if (messageMatch) {
+            parsedError = JSON.parse(messageMatch[1]);
+          }
+        } catch {}
+      }
+
+      // Check for authentication errors in various formats
+      const hasAuthError =
+        errorString.includes("x-api-key") ||
+        errorString.includes("authentication_error") ||
+        errorString.includes("invalid x-api-key") ||
+        errorText.includes("x-api-key") ||
+        errorText.includes("authentication_error") ||
+        errorText.includes("invalid") ||
+        (parsedError &&
+          (JSON.stringify(parsedError).includes("x-api-key") ||
+            JSON.stringify(parsedError).includes("authentication_error") ||
+            (parsedError.error &&
+              parsedError.error.type === "authentication_error")));
+
+      if (hasAuthError) {
+        console.error("Continue.dev API authentication error:", errorOutput);
+        return res.status(401).json({
+          error: "Continue.dev API authentication failed",
+          message:
+            "Continue.dev CLI requires an API key to be configured. Please configure Continue.dev with your LLM provider API key (e.g., OpenAI, Anthropic). See https://docs.continue.dev for setup instructions.",
+          details: errorOutput,
+        });
+      }
+
+      // Re-throw other errors
+      throw execError;
+    }
 
     if (stderr) {
       console.warn("Continue.dev stderr:", stderr);
+      // Check stderr for authentication errors too
+      if (
+        stderr.includes("x-api-key") ||
+        stderr.includes("authentication_error") ||
+        stderr.includes("invalid")
+      ) {
+        return res.status(401).json({
+          error: "Continue.dev API authentication failed",
+          message:
+            "Continue.dev CLI requires an API key to be configured. Please configure Continue.dev with your LLM provider API key (e.g., OpenAI, Anthropic). See https://docs.continue.dev for setup instructions.",
+          details: stderr,
+        });
+      }
     }
 
     // Parse response
@@ -541,6 +611,19 @@ Return only a JSON array of todos.`;
       if (jsonMatch) {
         todos = JSON.parse(jsonMatch[0]);
       } else {
+        // Check if stdout contains authentication error
+        if (
+          stdout.includes("x-api-key") ||
+          stdout.includes("authentication_error") ||
+          stdout.includes("invalid")
+        ) {
+          return res.status(401).json({
+            error: "Continue.dev API authentication failed",
+            message:
+              "Continue.dev CLI requires an API key to be configured. Please configure Continue.dev with your LLM provider API key (e.g., OpenAI, Anthropic). See https://docs.continue.dev for setup instructions.",
+            rawResponse: stdout,
+          });
+        }
         throw new Error("No JSON array found in response");
       }
     } catch (parseError) {
@@ -724,13 +807,39 @@ ${todo.project_name}
 Return only "VALID" if the code is syntactically correct and follows good practices, or "INVALID" with a brief explanation if there are issues.`;
 
     const projectPath = path.join(PROJECTS_DIR, todo.project_name);
-    const continueCommand = `cn -p "${prompt.replace(/"/g, '\\"')}"`;
+    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
+      /"/g,
+      '\\"'
+    )}"`;
 
-    const { stdout } = await execAsync(continueCommand, {
-      timeout: 15000,
-      maxBuffer: 1024 * 1024,
-      cwd: projectPath, // Set working directory to project path
-    });
+    let stdout;
+    try {
+      const result = await execAsync(continueCommand, {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+        cwd: projectPath, // Set working directory to project path
+        env: {
+          ...process.env, // Pass all environment variables including CONTINUE_API_KEY
+        },
+      });
+      stdout = result.stdout;
+    } catch (execError) {
+      const errorOutput =
+        execError.stdout || execError.stderr || execError.message || "";
+      if (
+        errorOutput.includes("x-api-key") ||
+        errorOutput.includes("authentication_error") ||
+        errorOutput.includes("invalid")
+      ) {
+        return res.status(401).json({
+          error: "Continue.dev API authentication failed",
+          message:
+            "Continue.dev CLI requires an API key to be configured. Please configure Continue.dev with your LLM provider API key.",
+          details: errorOutput,
+        });
+      }
+      throw execError;
+    }
 
     const isValid = stdout.trim().toUpperCase().startsWith("VALID");
 
@@ -776,13 +885,39 @@ ${todo.project_name}
 Return only "CORRECT" if the code correctly implements the described functionality, or "INCORRECT" with a brief explanation if there are logical issues.`;
 
     const projectPath = path.join(PROJECTS_DIR, todo.project_name);
-    const continueCommand = `cn -p "${prompt.replace(/"/g, '\\"')}"`;
+    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
+      /"/g,
+      '\\"'
+    )}"`;
 
-    const { stdout } = await execAsync(continueCommand, {
-      timeout: 15000,
-      maxBuffer: 1024 * 1024,
-      cwd: projectPath, // Set working directory to project path
-    });
+    let stdout;
+    try {
+      const result = await execAsync(continueCommand, {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+        cwd: projectPath, // Set working directory to project path
+        env: {
+          ...process.env, // Pass all environment variables including CONTINUE_API_KEY
+        },
+      });
+      stdout = result.stdout;
+    } catch (execError) {
+      const errorOutput =
+        execError.stdout || execError.stderr || execError.message || "";
+      if (
+        errorOutput.includes("x-api-key") ||
+        errorOutput.includes("authentication_error") ||
+        errorOutput.includes("invalid")
+      ) {
+        return res.status(401).json({
+          error: "Continue.dev API authentication failed",
+          message:
+            "Continue.dev CLI requires an API key to be configured. Please configure Continue.dev with your LLM provider API key.",
+          details: errorOutput,
+        });
+      }
+      throw execError;
+    }
 
     const isCorrect = stdout.trim().toUpperCase().startsWith("CORRECT");
 
@@ -796,6 +931,1071 @@ Return only "CORRECT" if the code correctly implements the described functionali
   } catch (error) {
     console.error("Check correctness error:", error);
     res.status(500).json({ error: "Failed to check correctness" });
+  }
+});
+
+// -----------------------------
+// Code Execution Endpoints
+// -----------------------------
+
+// Helper function to detect if code snippet is a shell command
+function isShellCommand(codeSnippet) {
+  const trimmed = codeSnippet.trim();
+
+  // Remove any leading/trailing whitespace and normalize
+  const normalized = trimmed.replace(/\s+/g, " ");
+
+  // Check for common shell command patterns
+  const shellPatterns = [
+    /^(npm|npx|yarn|pnpm)\s/i, // Package managers (case insensitive)
+    /^(git|cd|ls|mkdir|rm|cp|mv|chmod|chown|pwd|cat|grep|find)\s/i,
+    /^\.\/\w+/, // Executable scripts
+    /^(curl|wget|ssh|scp|rsync)\s/i,
+    /^echo\s/i,
+    /^export\s+\w+=/,
+    /^#!\/(bin|usr)\/(sh|bash|zsh)/, // Shebang
+  ];
+
+  const isShell = shellPatterns.some((pattern) => pattern.test(normalized));
+
+  // Additional check: if it doesn't look like code (no JS/Python keywords), treat as shell
+  if (!isShell && trimmed.length > 0) {
+    const hasCodeKeywords =
+      /(function|const|let|var|def|class|import|from|require|module\.exports)/i.test(
+        trimmed
+      );
+    const hasShellKeywords =
+      /^(npm|npx|yarn|pnpm|git|cd|ls|mkdir|rm|cp|mv|echo|export)/i.test(
+        trimmed
+      );
+
+    if (hasShellKeywords && !hasCodeKeywords) {
+      return true;
+    }
+  }
+
+  return isShell;
+}
+
+// Helper function to determine file extension from code snippet
+function detectLanguage(codeSnippet) {
+  // First check if it's a shell command
+  if (isShellCommand(codeSnippet)) {
+    return "sh";
+  }
+
+  // Simple heuristic-based detection
+  // Check for Python-specific patterns first
+  if (
+    codeSnippet.includes("def ") ||
+    (codeSnippet.includes("import ") && codeSnippet.includes("print(")) ||
+    (codeSnippet.includes("from ") && codeSnippet.includes("import "))
+  ) {
+    // Additional check: Python typically doesn't have semicolons, braces, or require
+    if (
+      !codeSnippet.includes("require(") &&
+      !codeSnippet.includes("module.exports") &&
+      !codeSnippet.includes("{")
+    ) {
+      return "py";
+    }
+  }
+  // Check for JavaScript/Node.js patterns
+  if (
+    codeSnippet.includes("require(") ||
+    codeSnippet.includes("module.exports") ||
+    codeSnippet.includes("export ") ||
+    codeSnippet.includes("function ") ||
+    codeSnippet.includes("const ") ||
+    codeSnippet.includes("let ") ||
+    codeSnippet.includes("var ")
+  ) {
+    return "js";
+  }
+  // Default to JavaScript for web projects
+  return "js";
+}
+
+// Helper function to create git checkpoint
+async function createGitCheckpoint(projectPath) {
+  console.log(
+    `[GIT-CHECKPOINT] Starting checkpoint creation for: ${projectPath}`
+  );
+  try {
+    // Check if it's a git repository
+    const gitDir = path.join(projectPath, ".git");
+    if (!fs.existsSync(gitDir)) {
+      console.log(
+        `[GIT-CHECKPOINT] Not a git repository: ${gitDir} does not exist`
+      );
+      return null; // Not a git repo, can't create checkpoint
+    }
+    console.log(`[GIT-CHECKPOINT] Git directory found: ${gitDir}`);
+
+    // Stage all changes
+    console.log(`[GIT-CHECKPOINT] Staging all changes...`);
+    try {
+      await execAsync("git add -A", { cwd: projectPath });
+      console.log(`[GIT-CHECKPOINT] Changes staged successfully`);
+    } catch (addError) {
+      console.error(
+        `[GIT-CHECKPOINT] Failed to stage changes:`,
+        addError.message
+      );
+      throw addError;
+    }
+
+    // Check if there are any changes to commit
+    try {
+      const { stdout: statusStdout } = await execAsync(
+        "git status --porcelain",
+        { cwd: projectPath }
+      );
+      console.log(
+        `[GIT-CHECKPOINT] Git status: ${statusStdout || "(no output)"}`
+      );
+      if (!statusStdout.trim()) {
+        // No changes, get current HEAD
+        console.log(
+          `[GIT-CHECKPOINT] No changes to commit, getting current HEAD...`
+        );
+        const { stdout: headStdout } = await execAsync("git rev-parse HEAD", {
+          cwd: projectPath,
+        });
+        const headHash = headStdout.trim();
+        console.log(`[GIT-CHECKPOINT] Current HEAD: ${headHash}`);
+        return headHash;
+      }
+    } catch (statusError) {
+      console.log(
+        `[GIT-CHECKPOINT] No commits yet, attempting initial commit...`
+      );
+      // No commits yet, create initial commit
+      try {
+        await execAsync('git commit -m "Checkpoint before todo execution"', {
+          cwd: projectPath,
+        });
+        const { stdout: commitStdout } = await execAsync("git rev-parse HEAD", {
+          cwd: projectPath,
+        });
+        const commitHash = commitStdout.trim();
+        console.log(`[GIT-CHECKPOINT] Initial commit created: ${commitHash}`);
+        return commitHash;
+      } catch (commitError) {
+        console.error(
+          `[GIT-CHECKPOINT] Failed to create initial commit:`,
+          commitError.message
+        );
+        // Can't commit (maybe no files or git not configured)
+        return null;
+      }
+    }
+
+    // Create a checkpoint commit
+    console.log(`[GIT-CHECKPOINT] Creating checkpoint commit...`);
+    try {
+      await execAsync('git commit -m "Checkpoint before todo execution"', {
+        cwd: projectPath,
+      });
+      const { stdout: commitStdout } = await execAsync("git rev-parse HEAD", {
+        cwd: projectPath,
+      });
+      const commitHash = commitStdout.trim();
+      console.log(`[GIT-CHECKPOINT] Checkpoint commit created: ${commitHash}`);
+      return commitHash;
+    } catch (commitError) {
+      console.error(`[GIT-CHECKPOINT] Commit failed:`, commitError.message);
+      // Commit failed, try to get current HEAD anyway
+      try {
+        const { stdout: headStdout } = await execAsync("git rev-parse HEAD", {
+          cwd: projectPath,
+        });
+        const headHash = headStdout.trim();
+        console.log(
+          `[GIT-CHECKPOINT] Using current HEAD as fallback: ${headHash}`
+        );
+        return headHash;
+      } catch (headError) {
+        console.error(
+          `[GIT-CHECKPOINT] Failed to get HEAD:`,
+          headError.message
+        );
+        return null;
+      }
+    }
+  } catch (error) {
+    console.error(
+      `[GIT-CHECKPOINT] Failed to create git checkpoint:`,
+      error.message
+    );
+    console.error(`[GIT-CHECKPOINT] Error stack:`, error.stack);
+    return null;
+  }
+}
+
+// Helper function to execute a single command attempt
+async function executeCommandAttempt(
+  command,
+  todo,
+  projectPath,
+  finalIsShellCmd,
+  language,
+  tempFilePath,
+  tempFileName
+) {
+  // Determine timeout based on command type
+  let timeout = 30000; // Default 30 seconds
+  if (finalIsShellCmd) {
+    // Shell commands might need more time, especially for npm/npx commands
+    if (
+      command.includes("npx") ||
+      command.includes("npm install") ||
+      command.includes("yarn")
+    ) {
+      timeout = 300000; // 5 minutes for package installation commands
+    } else if (
+      command.includes("npm") ||
+      command.includes("yarn") ||
+      command.includes("pnpm")
+    ) {
+      timeout = 120000; // 2 minutes for other npm commands
+    }
+  }
+
+  // For npx create-next-app, we need to make it non-interactive
+  let finalCommand = command;
+  if (command.includes("create-next-app")) {
+    // Check if directory is not empty (create-next-app won't work in non-empty dirs)
+    const isCreatingInCurrentDir =
+      command.includes(" .") || command.trim().endsWith(".");
+    if (isCreatingInCurrentDir) {
+      try {
+        const files = await fsp.readdir(projectPath);
+        const filteredFiles = files.filter(
+          (f) => !f.startsWith(".") && f !== "node_modules" && f !== ".git"
+        );
+
+        if (filteredFiles.length > 0) {
+          console.warn(
+            `[EXECUTE-ATTEMPT] Directory contains files: ${filteredFiles.join(
+              ", "
+            )}`
+          );
+        }
+      } catch (dirError) {
+        console.warn(
+          `[EXECUTE-ATTEMPT] Could not check directory contents:`,
+          dirError.message
+        );
+      }
+    }
+
+    // create-next-app needs --yes or -y flag to skip prompts
+    if (!command.includes("--yes") && !command.includes("-y")) {
+      finalCommand = command.replace(
+        /(create-next-app[^\s]*)\s+(\.)/,
+        "$1 --yes $2"
+      );
+
+      if (finalCommand === command) {
+        finalCommand = command.replace(/(create-next-app[^\s]*)/, "$1 --yes");
+      }
+    }
+  }
+
+  console.log(`[EXECUTE-ATTEMPT] Executing command: ${finalCommand}`);
+
+  try {
+    const { stdout, stderr } = await execAsync(finalCommand, {
+      timeout: timeout,
+      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      cwd: projectPath,
+      env: {
+        ...process.env,
+        CI: "true",
+        npm_config_yes: "true",
+      },
+    });
+
+    return {
+      success: true,
+      stdout: stdout,
+      stderr: stderr || null,
+      error: null,
+      errorCode: null,
+      errorSignal: null,
+    };
+  } catch (execError) {
+    return {
+      success: false,
+      stdout: execError.stdout || null,
+      stderr: execError.stderr || null,
+      error: execError.message || "Execution failed",
+      errorCode: execError.code || null,
+      errorSignal: execError.signal || null,
+    };
+  }
+}
+
+// Helper function to get error fix suggestion from Continue.dev
+async function getErrorFixSuggestion(
+  todo,
+  errorMessage,
+  errorStdout,
+  errorStderr,
+  command,
+  projectPath,
+  iterationNumber
+) {
+  try {
+    const errorContext = `
+TODO TITLE: ${todo.title}
+TODO DESCRIPTION: ${todo.description}
+ORIGINAL CODE/COMMAND: ${todo.code_snippet}
+
+EXECUTION ERROR (Attempt ${iterationNumber}):
+Command: ${command}
+Error: ${errorMessage}
+${errorStdout ? `\nStdout:\n${errorStdout}` : ""}
+${errorStderr ? `\nStderr:\n${errorStderr}` : ""}
+
+PROJECT CONTEXT:
+Project: ${todo.project_name}
+Working Directory: ${projectPath}
+
+Please analyze this error and provide a fix. The fix should be:
+1. A corrected command or code snippet that addresses the error
+2. An explanation of what went wrong
+3. If the error is due to directory conflicts or missing prerequisites, suggest the appropriate fix
+
+Return your response as JSON:
+{
+  "analysis": "Explanation of what went wrong",
+  "fix": "The corrected command/code to fix the issue",
+  "fixType": "command|code|manual",
+  "reasoning": "Why this fix should work"
+}`;
+
+    const prompt = errorContext;
+    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
+      /"/g,
+      '\\"'
+    )}"`;
+
+    console.log(
+      `[ERROR-FIX] Requesting fix suggestion from Continue.dev (iteration ${iterationNumber})...`
+    );
+    let stdout;
+    try {
+      const result = await execAsync(continueCommand, {
+        timeout: 30000,
+        maxBuffer: 1024 * 1024 * 10,
+        cwd: projectPath,
+        env: {
+          ...process.env, // Pass all environment variables including CONTINUE_API_KEY
+        },
+      });
+      stdout = result.stdout;
+    } catch (execError) {
+      const errorOutput =
+        execError.stdout || execError.stderr || execError.message || "";
+      if (
+        errorOutput.includes("x-api-key") ||
+        errorOutput.includes("authentication_error") ||
+        errorOutput.includes("invalid")
+      ) {
+        console.error(
+          `[ERROR-FIX] Continue.dev API authentication error on iteration ${iterationNumber}`
+        );
+        // Return null to indicate no fix suggestion available
+        return null;
+      }
+      // For other errors, return null as well
+      console.error(
+        `[ERROR-FIX] Continue.dev error on iteration ${iterationNumber}:`,
+        execError.message
+      );
+      return null;
+    }
+
+    // Check stdout for authentication errors
+    if (
+      stdout.includes("x-api-key") ||
+      stdout.includes("authentication_error") ||
+      stdout.includes("invalid")
+    ) {
+      console.error(
+        `[ERROR-FIX] Continue.dev API authentication error in response`
+      );
+      return null;
+    }
+
+    // Try to extract JSON from response
+    const jsonMatch = stdout.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const suggestion = JSON.parse(jsonMatch[0]);
+        console.log(`[ERROR-FIX] Received fix suggestion from LLM`);
+        return suggestion;
+      } catch (parseError) {
+        console.warn(`[ERROR-FIX] Failed to parse JSON, using raw response`);
+        return {
+          analysis: "Could not parse LLM response",
+          fix: stdout.trim(),
+          fixType: "command",
+          reasoning: "Raw LLM response",
+        };
+      }
+    } else {
+      // Use raw response as fix
+      return {
+        analysis: "LLM response format unclear",
+        fix: stdout.trim(),
+        fixType: "command",
+        reasoning: "Using raw LLM output",
+      };
+    }
+  } catch (error) {
+    console.error(`[ERROR-FIX] Failed to get fix suggestion:`, error.message);
+    return null;
+  }
+}
+
+// Execute code for a single todo with iterative error fixing
+router.post("/execute-code/:todoId", async (req, res) => {
+  const todoId = req.params.todoId;
+  const maxIterations = req.query.maxIterations
+    ? parseInt(req.query.maxIterations)
+    : 3;
+  console.log(
+    `[EXECUTE-CODE] Starting execution for todoId: ${todoId} (max iterations: ${maxIterations})`
+  );
+
+  try {
+    console.log(`[EXECUTE-CODE] Fetching todo with id: ${todoId}`);
+    const todo = await dbHelpers.getTodoById(todoId);
+
+    if (!todo) {
+      console.error(`[EXECUTE-CODE] Todo not found: ${todoId}`);
+      return res.status(404).json({ error: "Todo not found" });
+    }
+
+    console.log(
+      `[EXECUTE-CODE] Todo found: ${todo.title}, project: ${todo.project_name}`
+    );
+    console.log(`[EXECUTE-CODE] Has code snippet: ${!!todo.code_snippet}`);
+    console.log(
+      `[EXECUTE-CODE] Code snippet length: ${todo.code_snippet?.length || 0}`
+    );
+
+    if (!todo.code_snippet) {
+      console.error(`[EXECUTE-CODE] No code snippet for todo: ${todoId}`);
+      return res.status(400).json({ error: "No code snippet to execute" });
+    }
+
+    const projectPath = path.join(PROJECTS_DIR, todo.project_name);
+    console.log(`[EXECUTE-CODE] Project path: ${projectPath}`);
+
+    // Ensure project directory exists
+    if (!fs.existsSync(projectPath)) {
+      console.error(
+        `[EXECUTE-CODE] Project directory not found: ${projectPath}`
+      );
+      return res.status(404).json({ error: "Project directory not found" });
+    }
+    console.log(`[EXECUTE-CODE] Project directory exists: ${projectPath}`);
+
+    // Create git checkpoint before execution
+    let gitCommitHash = null;
+    let executionHistoryId = null;
+    try {
+      console.log(`[EXECUTE-CODE] Creating git checkpoint...`);
+      gitCommitHash = await createGitCheckpoint(projectPath);
+      if (gitCommitHash) {
+        console.log(`[EXECUTE-CODE] Checkpoint created: ${gitCommitHash}`);
+        // Store execution history - we'll use this ID for iterations
+        executionHistoryId = await dbHelpers.insertExecutionHistory(
+          todoId,
+          todo.project_name,
+          gitCommitHash
+        );
+        console.log(
+          `[EXECUTE-CODE] Execution history stored with ID: ${executionHistoryId}`
+        );
+      } else {
+        console.warn(
+          `[EXECUTE-CODE] No checkpoint created (not a git repo or no changes)`
+        );
+        // Still create execution history entry without commit hash
+        executionHistoryId = await dbHelpers.insertExecutionHistory(
+          todoId,
+          todo.project_name,
+          null
+        );
+      }
+    } catch (checkpointError) {
+      console.error(
+        `[EXECUTE-CODE] Failed to create checkpoint:`,
+        checkpointError
+      );
+      console.error(
+        `[EXECUTE-CODE] Checkpoint error stack:`,
+        checkpointError.stack
+      );
+      // Still create execution history entry
+      try {
+        executionHistoryId = await dbHelpers.insertExecutionHistory(
+          todoId,
+          todo.project_name,
+          null
+        );
+      } catch (histError) {
+        console.error(
+          `[EXECUTE-CODE] Failed to create execution history:`,
+          histError
+        );
+      }
+    }
+
+    // Detect language and determine execution command
+    console.log(`[EXECUTE-CODE] Detecting language...`);
+    console.log(
+      `[EXECUTE-CODE] Code snippet preview: ${todo.code_snippet.substring(
+        0,
+        100
+      )}...`
+    );
+
+    const isShellCmd = isShellCommand(todo.code_snippet);
+    const language = detectLanguage(todo.code_snippet);
+    const finalIsShellCmd = language === "sh" || isShellCmd;
+
+    console.log(
+      `[EXECUTE-CODE] Detected language: ${language}, isShellCommand: ${finalIsShellCmd}`
+    );
+
+    // Prepare initial command
+    let currentCommand = finalIsShellCmd
+      ? todo.code_snippet.trim()
+      : todo.code_snippet;
+    let tempFileName = null;
+    let tempFilePath = null;
+
+    // For non-shell commands, create temp file
+    if (!finalIsShellCmd) {
+      tempFileName = `todo_${todoId}_${Date.now()}.${language}`;
+      tempFilePath = path.join(projectPath, tempFileName);
+      await fsp.writeFile(tempFilePath, todo.code_snippet, "utf8");
+
+      if (language === "js") {
+        currentCommand = `node "${tempFileName}"`;
+      } else if (language === "py") {
+        currentCommand = `python3 "${tempFileName}"`;
+      } else {
+        currentCommand = `node "${tempFileName}"`;
+      }
+    }
+
+    // Iterative execution with error fixing
+    const iterations = [];
+    let finalResult = null;
+
+    for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      console.log(
+        `[EXECUTE-CODE] === Iteration ${iteration}/${maxIterations} ===`
+      );
+      console.log(`[EXECUTE-CODE] Command: ${currentCommand}`);
+
+      // Execute the command
+      const result = await executeCommandAttempt(
+        currentCommand,
+        todo,
+        projectPath,
+        finalIsShellCmd,
+        language,
+        tempFilePath,
+        tempFileName
+      );
+
+      // Store iteration log
+      const iterationLog = {
+        iterationNumber: iteration,
+        command: currentCommand,
+        success: result.success,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error,
+        errorCode: result.errorCode,
+        errorSignal: result.errorSignal,
+        llmSuggestion: null,
+        appliedFix: null,
+        status: result.success ? "success" : "failed",
+      };
+
+      if (result.success) {
+        // Success! Store iteration and return
+        console.log(
+          `[EXECUTE-CODE] Execution succeeded on iteration ${iteration}`
+        );
+        if (executionHistoryId) {
+          await dbHelpers.insertExecutionIteration(
+            executionHistoryId,
+            todoId,
+            iteration,
+            currentCommand,
+            null,
+            result.stdout,
+            result.stderr,
+            null,
+            null,
+            "success"
+          );
+        }
+        iterations.push(iterationLog);
+
+        // Clean up temp file
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            await fsp.unlink(tempFilePath);
+          } catch (e) {}
+        }
+
+        return res.json({
+          success: true,
+          output: result.stdout,
+          error: result.stderr || null,
+          language: language,
+          checkpointCreated: !!gitCommitHash,
+          gitCommitHash: gitCommitHash,
+          iterations: iterations,
+          totalIterations: iteration,
+        });
+      } else {
+        // Error occurred - get LLM fix suggestion
+        console.log(
+          `[EXECUTE-CODE] Execution failed on iteration ${iteration}, requesting fix...`
+        );
+
+        const llmSuggestion = await getErrorFixSuggestion(
+          todo,
+          result.error,
+          result.stdout,
+          result.stderr,
+          currentCommand,
+          projectPath,
+          iteration
+        );
+
+        iterationLog.llmSuggestion = llmSuggestion
+          ? JSON.stringify(llmSuggestion)
+          : null;
+
+        if (llmSuggestion && llmSuggestion.fix) {
+          console.log(`[EXECUTE-CODE] LLM suggested fix: ${llmSuggestion.fix}`);
+          console.log(`[EXECUTE-CODE] LLM analysis: ${llmSuggestion.analysis}`);
+
+          // Apply the fix
+          if (llmSuggestion.fixType === "command" && finalIsShellCmd) {
+            // For shell commands, use the suggested fix as new command
+            currentCommand = llmSuggestion.fix.trim();
+            iterationLog.appliedFix = currentCommand;
+            console.log(`[EXECUTE-CODE] Applied fix: ${currentCommand}`);
+          } else if (llmSuggestion.fixType === "code" && !finalIsShellCmd) {
+            // For code, update temp file
+            if (tempFilePath) {
+              await fsp.writeFile(tempFilePath, llmSuggestion.fix, "utf8");
+              iterationLog.appliedFix = llmSuggestion.fix;
+              console.log(`[EXECUTE-CODE] Updated code file with fix`);
+            }
+          } else {
+            // Try to apply fix as command anyway
+            currentCommand = llmSuggestion.fix.trim();
+            iterationLog.appliedFix = currentCommand;
+          }
+        } else {
+          console.warn(`[EXECUTE-CODE] No LLM fix suggestion available`);
+          iterationLog.status = "failed_no_fix";
+        }
+
+        // Store iteration in database
+        if (executionHistoryId) {
+          await dbHelpers.insertExecutionIteration(
+            executionHistoryId,
+            todoId,
+            iteration,
+            currentCommand,
+            result.error,
+            result.stdout,
+            result.stderr,
+            iterationLog.llmSuggestion,
+            iterationLog.appliedFix,
+            iterationLog.status
+          );
+        }
+
+        iterations.push(iterationLog);
+
+        // If this is the last iteration, return error
+        if (iteration === maxIterations) {
+          console.log(`[EXECUTE-CODE] Max iterations reached, returning error`);
+
+          // Clean up temp file
+          if (tempFilePath && fs.existsSync(tempFilePath)) {
+            try {
+              await fsp.unlink(tempFilePath);
+            } catch (e) {}
+          }
+
+          return res.status(500).json({
+            success: false,
+            error: result.error || "Execution failed after all iterations",
+            errorCode: result.errorCode,
+            errorSignal: result.errorSignal,
+            stderr: result.stderr,
+            stdout: result.stdout,
+            checkpointCreated: !!gitCommitHash,
+            gitCommitHash: gitCommitHash,
+            iterations: iterations,
+            totalIterations: iteration,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[EXECUTE-CODE] Top-level error for todoId ${todoId}:`);
+    console.error(`[EXECUTE-CODE] Error message: ${error.message}`);
+    console.error(`[EXECUTE-CODE] Error stack:`, error.stack);
+    res.status(500).json({
+      error: "Failed to execute code",
+      details: error.message,
+      todoId: todoId,
+    });
+  }
+});
+
+// Execute code for all todos in a project
+router.post("/execute-all-todos/:projectName", async (req, res) => {
+  try {
+    const { projectName } = req.params;
+
+    const todos = await dbHelpers.getTodosByProject(projectName);
+    const todosWithCode = todos.filter((todo) => todo.code_snippet);
+
+    if (todosWithCode.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "No todos with code snippets found" });
+    }
+
+    const projectPath = path.join(PROJECTS_DIR, projectName);
+
+    // Ensure project directory exists
+    if (!fs.existsSync(projectPath)) {
+      return res.status(404).json({ error: "Project directory not found" });
+    }
+
+    // Create git checkpoint before executing all todos
+    let gitCommitHash = null;
+    try {
+      gitCommitHash = await createGitCheckpoint(projectPath);
+      if (gitCommitHash) {
+        // Store execution history for all todos
+        for (const todo of todosWithCode) {
+          await dbHelpers.insertExecutionHistory(
+            todo.id,
+            projectName,
+            gitCommitHash
+          );
+        }
+      }
+    } catch (checkpointError) {
+      console.warn("Failed to create checkpoint:", checkpointError);
+      // Continue with execution even if checkpoint fails
+    }
+
+    const results = [];
+
+    for (const todo of todosWithCode) {
+      try {
+        // Detect language and determine execution command
+        const language = detectLanguage(todo.code_snippet);
+        const tempFileName = `todo_${todo.id}_${Date.now()}.${language}`;
+        const tempFilePath = path.join(projectPath, tempFileName);
+
+        try {
+          // Write code snippet to temporary file
+          await fsp.writeFile(tempFilePath, todo.code_snippet, "utf8");
+
+          // Determine execution command based on language
+          let execCommand;
+          if (language === "js") {
+            execCommand = `node "${tempFileName}"`;
+          } else if (language === "py") {
+            execCommand = `python3 "${tempFileName}"`;
+          } else {
+            execCommand = `node "${tempFileName}"`;
+          }
+
+          // Execute the code
+          const { stdout, stderr } = await execAsync(execCommand, {
+            timeout: 30000,
+            maxBuffer: 1024 * 1024 * 10,
+            cwd: projectPath,
+          });
+
+          // Clean up temporary file
+          try {
+            await fsp.unlink(tempFilePath);
+          } catch (cleanupError) {
+            console.warn("Failed to cleanup temp file:", cleanupError);
+          }
+
+          results.push({
+            todoId: todo.id,
+            title: todo.title,
+            success: true,
+            output: stdout,
+            error: stderr || null,
+            language: language,
+          });
+        } catch (execError) {
+          // Clean up temporary file on error
+          try {
+            await fsp.unlink(tempFilePath);
+          } catch (cleanupError) {
+            console.warn("Failed to cleanup temp file:", cleanupError);
+          }
+
+          results.push({
+            todoId: todo.id,
+            title: todo.title,
+            success: false,
+            error: execError.message || "Execution failed",
+            stderr: execError.stderr || null,
+            stdout: execError.stdout || null,
+          });
+        }
+      } catch (error) {
+        results.push({
+          todoId: todo.id,
+          title: todo.title,
+          success: false,
+          error: error.message || "Failed to execute",
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      total: todosWithCode.length,
+      results: results,
+      checkpointCreated: !!gitCommitHash,
+      gitCommitHash: gitCommitHash,
+    });
+  } catch (error) {
+    console.error("Execute all todos error:", error);
+    res.status(500).json({ error: "Failed to execute all todos" });
+  }
+});
+
+// -----------------------------
+// Revert Execution Endpoints
+// -----------------------------
+
+// Revert a single todo execution
+router.post("/revert-execution/:todoId", async (req, res) => {
+  try {
+    const { todoId } = req.params;
+
+    const todo = await dbHelpers.getTodoById(todoId);
+    if (!todo) {
+      return res.status(404).json({ error: "Todo not found" });
+    }
+
+    const projectPath = path.join(PROJECTS_DIR, todo.project_name);
+
+    // Ensure project directory exists
+    if (!fs.existsSync(projectPath)) {
+      return res.status(404).json({ error: "Project directory not found" });
+    }
+
+    // Check if it's a git repository
+    const gitDir = path.join(projectPath, ".git");
+    if (!fs.existsSync(gitDir)) {
+      return res.status(400).json({
+        error: "Project is not a git repository. Cannot revert changes.",
+      });
+    }
+
+    // Get the latest execution history for this todo
+    const executionHistory = await dbHelpers.getLatestExecutionHistoryByTodoId(
+      todoId
+    );
+    if (!executionHistory || !executionHistory.git_commit_hash) {
+      return res.status(404).json({
+        error: "No execution checkpoint found for this todo. Cannot revert.",
+      });
+    }
+
+    try {
+      // Reset to the checkpoint commit
+      await execAsync(`git reset --hard ${executionHistory.git_commit_hash}`, {
+        cwd: projectPath,
+      });
+
+      // Clean up any untracked files created during execution
+      try {
+        await execAsync("git clean -fd", { cwd: projectPath });
+      } catch (cleanError) {
+        console.warn("Failed to clean untracked files:", cleanError);
+      }
+
+      res.json({
+        success: true,
+        message: "Successfully reverted to checkpoint",
+        checkpointHash: executionHistory.git_commit_hash,
+        executedAt: executionHistory.executed_at,
+      });
+    } catch (gitError) {
+      console.error("Git revert error:", gitError);
+      res.status(500).json({
+        error: "Failed to revert changes",
+        details: gitError.message,
+      });
+    }
+  } catch (error) {
+    console.error("Revert execution error:", error);
+    res.status(500).json({ error: "Failed to revert execution" });
+  }
+});
+
+// Revert all executions for a project (revert to latest checkpoint)
+router.post("/revert-all-executions/:projectName", async (req, res) => {
+  try {
+    const { projectName } = req.params;
+
+    const projectPath = path.join(PROJECTS_DIR, projectName);
+
+    // Ensure project directory exists
+    if (!fs.existsSync(projectPath)) {
+      return res.status(404).json({ error: "Project directory not found" });
+    }
+
+    // Check if it's a git repository
+    const gitDir = path.join(projectPath, ".git");
+    if (!fs.existsSync(gitDir)) {
+      return res.status(400).json({
+        error: "Project is not a git repository. Cannot revert changes.",
+      });
+    }
+
+    // Get the latest execution history for the project
+    const executionHistoryList = await dbHelpers.getExecutionHistoryByProject(
+      projectName
+    );
+    if (!executionHistoryList || executionHistoryList.length === 0) {
+      return res.status(404).json({
+        error: "No execution checkpoints found. Cannot revert.",
+      });
+    }
+
+    // Get the most recent checkpoint (first in the list since it's ordered DESC)
+    const latestCheckpoint = executionHistoryList[0];
+    if (!latestCheckpoint.git_commit_hash) {
+      return res.status(404).json({
+        error: "No valid checkpoint found. Cannot revert.",
+      });
+    }
+
+    try {
+      // Reset to the latest checkpoint commit
+      await execAsync(`git reset --hard ${latestCheckpoint.git_commit_hash}`, {
+        cwd: projectPath,
+      });
+
+      // Clean up any untracked files created during execution
+      try {
+        await execAsync("git clean -fd", { cwd: projectPath });
+      } catch (cleanError) {
+        console.warn("Failed to clean untracked files:", cleanError);
+      }
+
+      res.json({
+        success: true,
+        message: "Successfully reverted all executions to latest checkpoint",
+        checkpointHash: latestCheckpoint.git_commit_hash,
+        executedAt: latestCheckpoint.executed_at,
+        totalReverted: executionHistoryList.length,
+      });
+    } catch (gitError) {
+      console.error("Git revert error:", gitError);
+      res.status(500).json({
+        error: "Failed to revert changes",
+        details: gitError.message,
+      });
+    }
+  } catch (error) {
+    console.error("Revert all executions error:", error);
+    res.status(500).json({ error: "Failed to revert all executions" });
+  }
+});
+
+// Check if a todo can be reverted (has checkpoint)
+router.get("/can-revert/:todoId", async (req, res) => {
+  try {
+    const { todoId } = req.params;
+
+    const todo = await dbHelpers.getTodoById(todoId);
+    if (!todo) {
+      return res.status(404).json({ error: "Todo not found" });
+    }
+
+    const projectPath = path.join(PROJECTS_DIR, todo.project_name);
+    const gitDir = path.join(projectPath, ".git");
+    const isGitRepo = fs.existsSync(gitDir);
+
+    const executionHistory = await dbHelpers.getLatestExecutionHistoryByTodoId(
+      todoId
+    );
+    const canRevert =
+      isGitRepo && executionHistory && executionHistory.git_commit_hash;
+
+    res.json({
+      canRevert: !!canRevert,
+      isGitRepo: isGitRepo,
+      hasCheckpoint: !!executionHistory,
+      checkpointHash: executionHistory?.git_commit_hash || null,
+      executedAt: executionHistory?.executed_at || null,
+    });
+  } catch (error) {
+    console.error("Check can revert error:", error);
+    res.status(500).json({ error: "Failed to check revert status" });
+  }
+});
+
+// Get execution iterations for a todo
+router.get("/execution-iterations/:todoId", async (req, res) => {
+  try {
+    const { todoId } = req.params;
+
+    const iterations = await dbHelpers.getExecutionIterationsByTodoId(todoId);
+
+    // Parse JSON fields
+    const parsedIterations = iterations.map((iter) => ({
+      ...iter,
+      llmSuggestion: iter.llm_suggestion
+        ? JSON.parse(iter.llm_suggestion)
+        : null,
+    }));
+
+    res.json({
+      success: true,
+      iterations: parsedIterations,
+      total: parsedIterations.length,
+    });
+  } catch (error) {
+    console.error("Get execution iterations error:", error);
+    res.status(500).json({ error: "Failed to get execution iterations" });
   }
 });
 

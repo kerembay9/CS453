@@ -63,6 +63,56 @@ db.serialize(() => {
       }
     }
   );
+
+  // Create execution_history table if it doesn't exist
+  db.run(
+    `
+    CREATE TABLE IF NOT EXISTS execution_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      todo_id INTEGER NOT NULL,
+      project_name TEXT NOT NULL,
+      git_commit_hash TEXT,
+      executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (todo_id) REFERENCES todos (id) ON DELETE CASCADE
+    )
+  `,
+    (err) => {
+      if (err) {
+        console.error("Error creating execution_history table:", err.message);
+      } else {
+        console.log("Execution history table ready");
+      }
+    }
+  );
+
+  // Create execution_iterations table for tracking retry attempts and fixes
+  db.run(
+    `
+    CREATE TABLE IF NOT EXISTS execution_iterations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      execution_history_id INTEGER NOT NULL,
+      todo_id INTEGER NOT NULL,
+      iteration_number INTEGER NOT NULL,
+      command TEXT NOT NULL,
+      error_message TEXT,
+      error_stdout TEXT,
+      error_stderr TEXT,
+      llm_suggestion TEXT,
+      applied_fix TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (execution_history_id) REFERENCES execution_history (id) ON DELETE CASCADE,
+      FOREIGN KEY (todo_id) REFERENCES todos (id) ON DELETE CASCADE
+    )
+  `,
+    (err) => {
+      if (err) {
+        console.error("Error creating execution_iterations table:", err.message);
+      } else {
+        console.log("Execution iterations table ready");
+      }
+    }
+  );
 });
 
 // Helper functions for database operations
@@ -278,6 +328,132 @@ const dbHelpers = {
       });
 
       stmt.finalize();
+    });
+  },
+
+  // Execution history helper functions
+  insertExecutionHistory: (todoId, projectName, gitCommitHash) => {
+    return new Promise((resolve, reject) => {
+      const stmt = db.prepare(`
+        INSERT INTO execution_history (todo_id, project_name, git_commit_hash)
+        VALUES (?, ?, ?)
+      `);
+
+      stmt.run([todoId, projectName, gitCommitHash], function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.lastID);
+        }
+      });
+
+      stmt.finalize();
+    });
+  },
+
+  getExecutionHistoryByTodoId: (todoId) => {
+    return new Promise((resolve, reject) => {
+      db.all(
+        "SELECT * FROM execution_history WHERE todo_id = ? ORDER BY executed_at DESC",
+        [todoId],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  },
+
+  getLatestExecutionHistoryByTodoId: (todoId) => {
+    return new Promise((resolve, reject) => {
+      db.get(
+        "SELECT * FROM execution_history WHERE todo_id = ? ORDER BY executed_at DESC LIMIT 1",
+        [todoId],
+        (err, row) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(row);
+          }
+        }
+      );
+    });
+  },
+
+  getExecutionHistoryByProject: (projectName) => {
+    return new Promise((resolve, reject) => {
+      db.all(
+        "SELECT * FROM execution_history WHERE project_name = ? ORDER BY executed_at DESC",
+        [projectName],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  },
+
+  // Execution iterations helper functions
+  insertExecutionIteration: (executionHistoryId, todoId, iterationNumber, command, errorMessage, errorStdout, errorStderr, llmSuggestion, appliedFix, status) => {
+    return new Promise((resolve, reject) => {
+      const stmt = db.prepare(`
+        INSERT INTO execution_iterations (
+          execution_history_id, todo_id, iteration_number, command,
+          error_message, error_stdout, error_stderr, llm_suggestion, applied_fix, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        [executionHistoryId, todoId, iterationNumber, command, errorMessage, errorStdout, errorStderr, llmSuggestion, appliedFix, status],
+        function (err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(this.lastID);
+          }
+        }
+      );
+
+      stmt.finalize();
+    });
+  },
+
+  getExecutionIterations: (executionHistoryId) => {
+    return new Promise((resolve, reject) => {
+      db.all(
+        "SELECT * FROM execution_iterations WHERE execution_history_id = ? ORDER BY iteration_number ASC",
+        [executionHistoryId],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  },
+
+  getExecutionIterationsByTodoId: (todoId) => {
+    return new Promise((resolve, reject) => {
+      db.all(
+        "SELECT * FROM execution_iterations WHERE todo_id = ? ORDER BY created_at DESC",
+        [todoId],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
     });
   },
 };
