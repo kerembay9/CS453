@@ -30,8 +30,6 @@ db.serialize(() => {
     (err) => {
       if (err) {
         console.error("Error creating table:", err.message);
-      } else {
-        console.log("Audio files table ready");
       }
     }
   );
@@ -58,8 +56,6 @@ db.serialize(() => {
     (err) => {
       if (err) {
         console.error("Error creating todos table:", err.message);
-      } else {
-        console.log("Todos table ready");
       }
     }
   );
@@ -81,7 +77,6 @@ db.serialize(() => {
       if (err) {
         console.error("Error creating execution_history table:", err.message);
       } else {
-        console.log("Execution history table ready");
         // Add reverted column if it doesn't exist (for existing databases)
         db.run(
           `ALTER TABLE execution_history ADD COLUMN reverted BOOLEAN DEFAULT 0`,
@@ -125,8 +120,6 @@ db.serialize(() => {
           "Error creating execution_iterations table:",
           err.message
         );
-      } else {
-        console.log("Execution iterations table ready");
       }
     }
   );
@@ -146,12 +139,14 @@ db.serialize(() => {
       if (err) {
         console.error("Error creating settings table:", err.message);
       } else {
-        console.log("Settings table ready");
         // Initialize default settings
         db.run(
           `INSERT OR IGNORE INTO settings (key, value, description) VALUES 
             ('max_retries', '3', 'Maximum number of retry attempts for code execution'),
-            ('continue_api_key', '', 'Continue.dev API key (Gemini/Gemini API key)'),
+            ('continue_api_key', '', 'Continue.dev API key (Gemini/Gemini API key) - DEPRECATED: Use gemini_api_key'),
+            ('gemini_api_key', '', 'Gemini API key for Continue.dev'),
+            ('openai_api_key', '', 'OpenAI API key for Continue.dev'),
+            ('active_api_provider', 'gemini', 'Active API provider: openai or gemini'),
             ('continue_timeout', '30000', 'Timeout for Continue.dev commands in milliseconds'),
             ('file_upload_limit_mb', '100', 'Maximum file upload size in megabytes'),
             ('n8n_webhook_url', 'http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043', 'N8N webhook URL for integrations')`,
@@ -161,8 +156,6 @@ db.serialize(() => {
                 "Error initializing default settings:",
                 initErr.message
               );
-            } else {
-              console.log("Default settings initialized");
             }
           }
         );
