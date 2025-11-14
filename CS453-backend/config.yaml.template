@@ -2,11 +2,19 @@ name: "Opsidian Configuration"
 version: "1.0"
 schema: v1
 models:
-  - name: Gemini-flash
+  - name: Active-model
     provider: gemini
     model: gemini-2.0-flash-exp
     apiKey: "${GEMINI_API_KEY}"
     roles:
       - chat
       - autocomplete
+  # Example OpenAI configuration:
+  # - name: OpenAI GPT-4.1 nano
+  #   provider: openai
+  #   model: gpt-4.1-nano-2025-04-14
+  #   apiKey: "${OPENAI_API_KEY}"
+  #   roles:
+  #     - chat
+  #     - autocomplete
 
