@@ -1,6 +1,8 @@
 const { exec } = require("child_process");
 const { promisify } = require("util");
 const { CONTINUE_CONFIG_PATH } = require("./config");
+const { ScreenContinueConnection } = require("./screenContinue");
+const { dbHelpers } = require("../db");
 
 const execAsync = promisify(exec);
 
@@ -140,175 +142,85 @@ function detectQuotaError(errorOutput) {
   }
 }
 
-// Helper function to execute code using Continue.dev CLI
+// Helper function to execute code using Continue.dev CLI via screen session
 async function executeCodeWithContinue(codeSnippet, todo, projectPath) {
   // Build execution prompt - just pass todo content directly to Continue.dev
-  const executionPrompt = `${todo.title}
+  // Note: This is a one-way communication with an agentic AI - execute directly without asking follow-up questions
+  const executionPrompt = `CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. This is a ONE-WAY communication. You are an agentic AI that MUST execute tasks directly.
+2. DO NOT ask questions. DO NOT ask for confirmation. DO NOT ask "Would you like me to..." or similar.
+3. If you encounter any issues (Node.js version, missing dependencies, etc.), handle them automatically:
+   - For Node.js version issues: Use the current Node.js version or install the required version automatically
+   - For missing dependencies: Install them automatically
+   - For configuration issues: Configure automatically using sensible defaults
+4. Execute the task immediately without any user interaction.
+
+TASK TO EXECUTE:
+${todo.title}
 ${todo.description}
 
-${codeSnippet}`;
+${codeSnippet}
 
-  const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${executionPrompt}" --allow Write`;
+Remember: Execute immediately. No questions. No confirmations. Just do it.`;
 
-  console.log(`[EXECUTE-CONTINUE] Continue command: ${continueCommand}`);
-  // Determine timeout based on code snippet content
-  let timeout = 60000; // Default 60 seconds for Continue.dev
-  if (
-    codeSnippet.includes("npx") ||
-    codeSnippet.includes("npm install") ||
-    codeSnippet.includes("yarn")
-  ) {
-    timeout = 600000; // 10 minutes for package installation
-  } else if (
-    codeSnippet.includes("npm") ||
-    codeSnippet.includes("yarn") ||
-    codeSnippet.includes("pnpm")
-  ) {
-    timeout = 120000; // 2 minutes for other npm commands
+  // Get timeout from database settings, default to 5 minutes (300000ms)
+  let timeout = 300000;
+  try {
+    const timeoutSetting = await dbHelpers.getSetting("continue_timeout");
+    if (timeoutSetting && timeoutSetting.value) {
+      timeout = parseInt(timeoutSetting.value, 10) || 300000;
+    }
+  } catch (error) {
+    console.warn("Failed to get continue_timeout setting, using default:", error);
   }
 
-  console.log(`[EXECUTE-CONTINUE] ==========================================`);
-  console.log(`[EXECUTE-CONTINUE] Executing via Continue.dev CLI...`);
-  console.log(`[EXECUTE-CONTINUE] Project path: ${projectPath}`);
-  console.log(`[EXECUTE-CONTINUE] Todo title: ${todo.title}`);
-  console.log(
-    `[EXECUTE-CONTINUE] Code snippet preview: ${codeSnippet.substring(
-      0,
-      100
-    )}...`
-  );
-  console.log(`[EXECUTE-CONTINUE] Full command: ${continueCommand}...`);
-  console.log(`[EXECUTE-CONTINUE] Command timeout: ${timeout}ms`);
-
   try {
-    console.log(`[EXECUTE-CONTINUE] Starting execAsync...`);
-    const { stdout, stderr } = await execAsync(continueCommand, {
-      timeout: timeout,
-      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-      cwd: projectPath,
-      env: {
-        ...process.env,
-        CI: "true",
-        npm_config_yes: "true",
-      },
-    });
+    // Create screen connection for this project
+    const connection = new ScreenContinueConnection(
+      CONTINUE_CONFIG_PATH,
+      projectPath
+    );
 
-    console.log(`[EXECUTE-CONTINUE] Command executed successfully`);
-    console.log(
-      `[EXECUTE-CONTINUE] Stdout length: ${stdout?.length || 0} characters`
+    // Session is created at server startup, just verify it exists
+    await connection.ensureScreenSession();
+
+    const result = await connection.sendMessageAndWait(
+      todo.id, // Pass todo ID instead of message
+      timeout
     );
-    console.log(
-      `[EXECUTE-CONTINUE] Stderr length: ${stderr?.length || 0} characters`
-    );
-    console.log(
-      `[EXECUTE-CONTINUE] Stdout preview: ${
-        stdout?.substring(0, 500) || "(empty)"
-      }`
-    );
-    if (stderr) {
-      console.log(`[EXECUTE-CONTINUE] Stderr: ${stderr.substring(0, 500)}`);
-    }
+
+    const stdout = result.stdout || "";
 
     // Try to parse Continue.dev response as JSON
-    let result;
+    let parsedResult;
     try {
-      // Extract JSON from response
       const jsonMatch = stdout.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        console.log(`[EXECUTE-CONTINUE] Found JSON in response, parsing...`);
-        result = JSON.parse(jsonMatch[0]);
-        console.log(
-          `[EXECUTE-CONTINUE] Parsed result:`,
-          JSON.stringify(result, null, 2)
-        );
-        console.log(`[EXECUTE-CONTINUE] Result success: ${result.success}`);
-        console.log(
-          `[EXECUTE-CONTINUE] Result filePath: ${result.filePath || "(null)"}`
-        );
+        parsedResult = JSON.parse(jsonMatch[0]);
       } else {
-        console.log(
-          `[EXECUTE-CONTINUE] No JSON found in stdout, treating as plain text`
-        );
-
-        // If no JSON found, treat entire output as stdout
-        result = {
-          success: true,
-          stdout: stdout,
-          stderr: stderr || null,
-          error: null,
-          output: stdout,
-        };
+        parsedResult = null;
       }
     } catch (parseError) {
-      console.error(`[EXECUTE-CONTINUE] JSON parse error:`, parseError.message);
-      console.error(`[EXECUTE-CONTINUE] Parse error stack:`, parseError.stack);
-      // If parsing fails, treat as success with raw output
-      result = {
-        success: true,
-        stdout: stdout,
-        stderr: stderr || null,
-        error: null,
-        output: stdout,
-      };
+      parsedResult = null;
     }
 
-    const returnValue = {
-      success: result.success !== false,
-      stdout: result.stdout || result.output || stdout,
-      stderr: result.stderr || stderr || null,
-      error: result.error || null,
+    return {
+      success: result.success && parsedResult?.success !== false,
+      stdout:
+        parsedResult?.stdout || parsedResult?.output || result.stdout || stdout,
+      stderr: parsedResult?.stderr || result.stderr || null,
+      error: parsedResult?.error || result.error || null,
       errorCode: null,
       errorSignal: null,
-      filePath: result.filePath || null, // Path to saved file (for code snippets)
-      rawResponse: stdout,
+      filePath: parsedResult?.filePath || null,
+      rawResponse: result.rawResponse || stdout,
     };
-
-    console.log(`[EXECUTE-CONTINUE] Returning:`, {
-      success: returnValue.success,
-      hasStdout: !!returnValue.stdout,
-      hasStderr: !!returnValue.stderr,
-      filePath: returnValue.filePath,
-      error: returnValue.error,
-    });
-    console.log(
-      `[EXECUTE-CONTINUE] ==========================================`
-    );
-
-    return returnValue;
-  } catch (execError) {
-    console.error(
-      `[EXECUTE-CONTINUE] ==========================================`
-    );
-    console.error(`[EXECUTE-CONTINUE] Command execution failed!`);
-    console.error(`[EXECUTE-CONTINUE] Error code: ${execError.code}`);
-    console.error(`[EXECUTE-CONTINUE] Error signal: ${execError.signal}`);
-    console.error(`[EXECUTE-CONTINUE] Error message: ${execError.message}`);
-
-    // Check for authentication errors
-    const errorOutput =
-      execError.stdout || execError.stderr || execError.message || "";
-
-    console.error(
-      `[EXECUTE-CONTINUE] Error stdout length: ${execError.stdout?.length || 0}`
-    );
-    console.error(
-      `[EXECUTE-CONTINUE] Error stderr length: ${execError.stderr?.length || 0}`
-    );
-    console.error(
-      `[EXECUTE-CONTINUE] Error stdout: ${
-        execError.stdout?.substring(0, 1000) || "(empty)"
-      }`
-    );
-    console.error(
-      `[EXECUTE-CONTINUE] Error stderr: ${
-        execError.stderr?.substring(0, 1000) || "(empty)"
-      }`
-    );
+  } catch (error) {
+    const errorOutput = error.message || "";
 
     // Check for quota/rate limit errors first
     const quotaError = detectQuotaError(errorOutput);
     if (quotaError) {
-      console.error(`[EXECUTE-CONTINUE] Quota/rate limit error detected`);
       return {
         success: false,
         stdout: null,
@@ -329,7 +241,6 @@ ${codeSnippet}`;
       errorOutput.includes("authentication_error") ||
       errorOutput.includes("invalid")
     ) {
-      console.error(`[EXECUTE-CONTINUE] Authentication error detected`);
       return {
         success: false,
         stdout: null,
@@ -341,51 +252,19 @@ ${codeSnippet}`;
       };
     }
 
-    // Try to parse error output as JSON
-    let errorResult;
-    try {
-      const jsonMatch = errorOutput.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        console.log(
-          `[EXECUTE-CONTINUE] Found JSON in error output, parsing...`
-        );
-        errorResult = JSON.parse(jsonMatch[0]);
-        console.log(
-          `[EXECUTE-CONTINUE] Parsed error result:`,
-          JSON.stringify(errorResult, null, 2)
-        );
-      }
-    } catch (parseErr) {
-      console.error(
-        `[EXECUTE-CONTINUE] Failed to parse error JSON:`,
-        parseErr.message
-      );
-    }
-
-    const returnValue = {
+    return {
       success: false,
-      stdout: execError.stdout || errorResult?.stdout || null,
-      stderr: execError.stderr || errorResult?.stderr || errorOutput,
-      error: errorResult?.error || execError.message || "Execution failed",
-      errorCode: execError.code || null,
-      errorSignal: execError.signal || null,
+      stdout: null,
+      stderr: errorOutput,
+      error: error.message || "Execution failed",
+      errorCode: null,
+      errorSignal: null,
       rawResponse: errorOutput,
     };
-
-    console.error(`[EXECUTE-CONTINUE] Returning error:`, {
-      success: returnValue.success,
-      error: returnValue.error,
-      errorCode: returnValue.errorCode,
-    });
-    console.error(
-      `[EXECUTE-CONTINUE] ==========================================`
-    );
-
-    return returnValue;
   }
 }
 
-// Helper function to get error fix suggestion from Continue.dev
+// Helper function to get error fix suggestion from Continue.dev via screen session
 async function getErrorFixSuggestion(
   todo,
   errorMessage,
@@ -424,29 +303,24 @@ Return your response as JSON:
   "reasoning": "Why this fix should work"
 }`;
 
-    const prompt = errorContext;
-    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
-      /"/g,
-      '\\"'
-    )}" --auto`;
-    console.log(`[ERROR-FIX] Continue command: ${continueCommand}`);
     console.log(
       `[ERROR-FIX] Requesting fix suggestion from Continue.dev (iteration ${iterationNumber})...`
     );
-    let stdout;
+
+    // Create screen connection for this project
+    const connection = new ScreenContinueConnection(
+      CONTINUE_CONFIG_PATH,
+      projectPath
+    );
+
+    // Session is created at server startup, just verify it exists
+    await connection.ensureScreenSession();
+
+    let result;
     try {
-      const result = await execAsync(continueCommand, {
-        timeout: 30000,
-        maxBuffer: 1024 * 1024 * 10,
-        cwd: projectPath,
-        env: {
-          ...process.env, // Pass all environment variables including CONTINUE_API_KEY
-        },
-      });
-      stdout = result.stdout;
-    } catch (execError) {
-      const errorOutput =
-        execError.stdout || execError.stderr || execError.message || "";
+      result = await connection.sendMessageAndWait(errorContext, 30000);
+    } catch (error) {
+      const errorOutput = error.message || "";
 
       // Check for quota/rate limit errors
       const quotaError = detectQuotaError(errorOutput);
@@ -454,7 +328,6 @@ Return your response as JSON:
         console.error(
           `[ERROR-FIX] Quota/rate limit error on iteration ${iterationNumber}`
         );
-        // Return null to indicate no fix suggestion available (can't use LLM)
         return null;
       }
 
@@ -466,16 +339,17 @@ Return your response as JSON:
         console.error(
           `[ERROR-FIX] Continue.dev API authentication error on iteration ${iterationNumber}`
         );
-        // Return null to indicate no fix suggestion available
         return null;
       }
-      // For other errors, return null as well
+
       console.error(
         `[ERROR-FIX] Continue.dev error on iteration ${iterationNumber}:`,
-        execError.message
+        error.message
       );
       return null;
     }
+
+    const stdout = result.stdout || "";
 
     // Check stdout for authentication errors
     if (
@@ -525,4 +399,3 @@ module.exports = {
   executeCodeWithContinue,
   getErrorFixSuggestion,
 };
-
