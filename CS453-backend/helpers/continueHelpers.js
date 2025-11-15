@@ -171,7 +171,10 @@ Remember: Execute immediately. No questions. No confirmations. Just do it.`;
       timeout = parseInt(timeoutSetting.value, 10) || 300000;
     }
   } catch (error) {
-    console.warn("Failed to get continue_timeout setting, using default:", error);
+    console.warn(
+      "Failed to get continue_timeout setting, using default:",
+      error
+    );
   }
 
   try {
