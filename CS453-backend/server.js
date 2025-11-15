@@ -5,9 +5,12 @@ const passport = require("passport");
 const GitHubStrategy = require("passport-github2").Strategy;
 require("dotenv").config();
 
+const { ScreenContinueConnection } = require("./helpers/screenContinue");
+const { CONTINUE_CONFIG_PATH } = require("./helpers/config");
+
 const app = express();
-const authRoutes = require('./routes/auth');
-const projectRoutes = require('./routes/projects');
+const authRoutes = require("./routes/auth");
+const projectRoutes = require("./routes/projects");
 
 app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(express.json());
@@ -41,9 +44,10 @@ passport.deserializeUser((user, done) => done(null, user));
 app.get("/", (req, res) => res.send("Backend is running"));
 
 // Routes
-app.use('/auth', authRoutes);
-app.use('/api', projectRoutes);
+app.use("/auth", authRoutes);
+app.use("/api", projectRoutes);
 
 app.listen(3001, () => {
   console.log("Backend running on port 3001");
+  console.log("Screen session 'opsidian-continue' will be created per-project when executing todos");
 });
