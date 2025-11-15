@@ -147,7 +147,7 @@ db.serialize(() => {
             ('gemini_api_key', '', 'Gemini API key for Continue.dev'),
             ('openai_api_key', '', 'OpenAI API key for Continue.dev'),
             ('active_api_provider', 'gemini', 'Active API provider: openai or gemini'),
-            ('continue_timeout', '30000', 'Timeout for Continue.dev commands in milliseconds'),
+            ('continue_timeout', '300000', 'Timeout for Continue.dev commands in milliseconds (default: 5 minutes)'),
             ('file_upload_limit_mb', '100', 'Maximum file upload size in megabytes'),
             ('n8n_webhook_url', 'http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043', 'N8N webhook URL for integrations')`,
           (initErr) => {
