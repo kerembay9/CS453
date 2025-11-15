@@ -1,16 +1,11 @@
 const express = require("express");
 const path = require("path");
-const { exec } = require("child_process");
-const { promisify } = require("util");
 const { dbHelpers } = require("../db");
-const {
-  PROJECTS_DIR,
-  CONTINUE_CONFIG_PATH,
-} = require("../helpers/config");
+const { PROJECTS_DIR, CONTINUE_CONFIG_PATH } = require("../helpers/config");
 const { buildCodebaseContext } = require("../helpers/codebaseContext");
+const { ScreenContinueConnection } = require("../helpers/screenContinue");
 
 const router = express.Router();
-const execAsync = promisify(exec);
 
 // Generate todos from audio transcription
 router.post("/generate-todos/:audioFileId", async (req, res) => {
@@ -34,7 +29,10 @@ router.post("/generate-todos/:audioFileId", async (req, res) => {
     const codebaseContext = await buildCodebaseContext(projectPath);
 
     // Create prompt for Continue.dev
-    const prompt = `Based on this voice transcription from a developer and the current codebase state, generate actionable development todos:
+    // Note: This is a one-way communication with an agentic AI - generate todos directly without asking follow-up questions
+    const prompt = `IMPORTANT: This is a one-way communication. You are an agentic AI that generates tasks directly without asking follow-up questions. Generate the todos based on the following information:
+
+Based on this voice transcription from a developer and the current codebase state, generate actionable development todos:
 
 TRANSCRIPTION:
 ${audioFile.transcription_text}
@@ -60,30 +58,57 @@ Format each todo as JSON:
 
 Return only a JSON array of todos.`;
 
-    // Execute Continue.dev CLI command
-    // Use local config.yaml file
-    const continueCommand = `cn --config "${CONTINUE_CONFIG_PATH}" -p "${prompt.replace(
-      /"/g,
-      '\\"'
-    )}" --auto`;
-
-    console.log(`[GENERATE-TODOS] Executing Continue.dev CLI...`);
-    console.log(`[GENERATE-TODOS] Command: ${continueCommand.substring(0, 200)}...`);
+    // Execute Continue.dev CLI command via screen session
+    console.log(`[GENERATE-TODOS] Executing Continue.dev CLI via screen...`);
 
     let stdout;
     try {
-      const result = await execAsync(continueCommand, {
-        timeout: 120000, // 2 minutes timeout
-        maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-        cwd: projectPath,
-        env: {
-          ...process.env,
-        },
-      });
-      stdout = result.stdout;
-    } catch (execError) {
-      const errorOutput =
-        execError.stdout || execError.stderr || execError.message || "";
+      // Create screen connection for this project
+      const connection = new ScreenContinueConnection(
+        CONTINUE_CONFIG_PATH,
+        projectPath
+      );
+
+      // Session is created at server startup, just verify it exists
+      await connection.ensureScreenSession();
+
+      // Get timeout from database settings, default to 5 minutes (300000ms)
+      let timeout = 300000;
+      try {
+        const timeoutSetting = await dbHelpers.getSetting("continue_timeout");
+        if (timeoutSetting && timeoutSetting.value) {
+          timeout = parseInt(timeoutSetting.value, 10) || 300000;
+        }
+      } catch (error) {
+        console.warn("Failed to get continue_timeout setting, using default:", error);
+      }
+
+      // Send prompt and wait for response
+      const result = await connection.sendMessageAndWait(prompt, timeout);
+      stdout = result.stdout || "";
+
+      // Check for authentication errors
+      if (
+        stdout.includes("x-api-key") ||
+        stdout.includes("authentication_error") ||
+        stdout.includes("invalid")
+      ) {
+        return res.status(401).json({
+          error:
+            "Continue.dev API authentication failed. Please check your API key in settings.",
+        });
+      }
+
+      // Check if execution failed
+      if (!result.success && result.error) {
+        console.error(`[GENERATE-TODOS] Continue.dev error:`, result.error);
+        return res.status(500).json({
+          error: "Failed to generate todos. Continue.dev CLI error.",
+          details: result.error.substring(0, 500),
+        });
+      }
+    } catch (error) {
+      const errorOutput = error.message || "";
       console.error(`[GENERATE-TODOS] Continue.dev error:`, errorOutput);
 
       // Check for authentication errors
@@ -93,7 +118,8 @@ Return only a JSON array of todos.`;
         errorOutput.includes("invalid")
       ) {
         return res.status(401).json({
-          error: "Continue.dev API authentication failed. Please check your API key in settings.",
+          error:
+            "Continue.dev API authentication failed. Please check your API key in settings.",
         });
       }
 
@@ -110,7 +136,8 @@ Return only a JSON array of todos.`;
       stdout.includes("invalid")
     ) {
       return res.status(401).json({
-        error: "Continue.dev API authentication failed. Please check your API key in settings.",
+        error:
+          "Continue.dev API authentication failed. Please check your API key in settings.",
       });
     }
 
@@ -282,4 +309,3 @@ router.delete("/:id", async (req, res) => {
 });
 
 module.exports = router;
-

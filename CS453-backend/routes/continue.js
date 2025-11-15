@@ -19,64 +19,39 @@ const execAsync = promisify(exec);
 router.post("/execute-todo/:todoId", async (req, res) => {
   const todoId = req.params.todoId;
 
-  console.log(`[EXECUTE-TODO] Starting execution for todoId: ${todoId}`);
-
   try {
     const todo = await dbHelpers.getTodoById(todoId);
 
     if (!todo) {
-      console.error(`[EXECUTE-TODO] Todo not found: ${todoId}`);
       return res.status(404).json({ error: "Todo not found" });
     }
 
-    console.log(
-      `[EXECUTE-TODO] Todo found: ${todo.title}, project: ${todo.project_name}`
-    );
-    console.log(`[EXECUTE-TODO] Has code snippet: ${!!todo.code_snippet}`);
-    console.log(
-      `[EXECUTE-TODO] Code snippet length: ${todo.code_snippet?.length || 0}`
-    );
-
     if (!todo.code_snippet) {
-      console.error(`[EXECUTE-TODO] No code snippet for todo: ${todoId}`);
       return res
         .status(400)
         .json({ error: "No code snippet or command to execute" });
     }
 
     const projectPath = path.join(PROJECTS_DIR, todo.project_name);
-    console.log(`[EXECUTE-TODO] Project path: ${projectPath}`);
 
     // Ensure project directory exists
     if (!fs.existsSync(projectPath)) {
-      console.error(
-        `[EXECUTE-TODO] Project directory not found: ${projectPath}`
-      );
       return res.status(404).json({ error: "Project directory not found" });
     }
-    console.log(`[EXECUTE-TODO] Project directory exists: ${projectPath}`);
 
     // Create git checkpoint before execution
     let gitCommitHash = null;
     let executionHistoryId = null;
     try {
-      console.log(`[EXECUTE-TODO] Creating git checkpoint...`);
       gitCommitHash = await createGitCheckpoint(projectPath);
       if (gitCommitHash) {
-        console.log(`[EXECUTE-TODO] Checkpoint created: ${gitCommitHash}`);
         // Store execution history
         executionHistoryId = await dbHelpers.insertExecutionHistory(
           todoId,
           todo.project_name,
           gitCommitHash
         );
-        console.log(
-          `[EXECUTE-TODO] Execution history stored with ID: ${executionHistoryId}`
-        );
       } else {
-        console.warn(
-          `[EXECUTE-TODO] No checkpoint created (not a git repo or no changes)`
-        );
         // Still create execution history entry without commit hash
         executionHistoryId = await dbHelpers.insertExecutionHistory(
           todoId,
@@ -85,10 +60,6 @@ router.post("/execute-todo/:todoId", async (req, res) => {
         );
       }
     } catch (checkpointError) {
-      console.error(
-        `[EXECUTE-TODO] Failed to create checkpoint:`,
-        checkpointError
-      );
       // Still create execution history entry
       try {
         executionHistoryId = await dbHelpers.insertExecutionHistory(
@@ -97,27 +68,16 @@ router.post("/execute-todo/:todoId", async (req, res) => {
           null
         );
       } catch (histError) {
-        console.error(
-          `[EXECUTE-TODO] Failed to create execution history:`,
-          histError
-        );
+        // Ignore
       }
     }
 
     // Execute the todo (code or command)
-    console.log(`[EXECUTE-TODO] Executing todo...`);
     const result = await executeCodeWithContinue(
       todo.code_snippet.trim(),
       todo,
       projectPath
     );
-
-    console.log(`[EXECUTE-TODO] Result received:`);
-    console.log(`[EXECUTE-TODO] - success: ${result.success}`);
-    console.log(`[EXECUTE-TODO] - filePath: ${result.filePath || "(null)"}`);
-    console.log(`[EXECUTE-TODO] - has stdout: ${!!result.stdout}`);
-    console.log(`[EXECUTE-TODO] - has stderr: ${!!result.stderr}`);
-    console.log(`[EXECUTE-TODO] - error: ${result.error || "(null)"}`);
 
     // Store execution iteration
     if (executionHistoryId) {
@@ -139,14 +99,8 @@ router.post("/execute-todo/:todoId", async (req, res) => {
       // Update todo status to completed on successful execution
       try {
         await dbHelpers.updateTodo(todoId, { status: "completed" });
-        console.log(
-          `[EXECUTE-TODO] Updated todo ${todoId} status to completed`
-        );
       } catch (statusError) {
-        console.warn(
-          `[EXECUTE-TODO] Failed to update todo status:`,
-          statusError.message
-        );
+        // Ignore
       }
 
       return res.json({
@@ -191,8 +145,6 @@ router.post("/execute-todo/:todoId", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error(`[EXECUTE-TODO] Top-level error for todoId ${todoId}:`);
-    console.error(`[EXECUTE-TODO] Error message: ${error.message}`);
     res.status(500).json({
       error: "Failed to execute todo",
       details: error.message,
