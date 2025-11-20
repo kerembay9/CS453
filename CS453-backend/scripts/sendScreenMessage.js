@@ -43,6 +43,12 @@ async function getMessage() {
    - For missing dependencies: Install them automatically
    - For configuration issues: Configure automatically using sensible defaults
 4. Execute the task immediately without any user interaction.
+5. AFTER completing the task, you MUST check for syntax errors in the codebase and fix any syntax errors you find:
+   - For TypeScript/JavaScript projects: Run syntax checks (e.g., "tsc --noEmit" for TypeScript, "node --check" for JavaScript files, or use the project's linter)
+   - For Python projects: Run "python3 -m py_compile" on modified files or use a linter
+   - For other languages: Use appropriate syntax checking tools
+   - If any syntax errors are found, fix them immediately
+   - Continue checking and fixing until there are no syntax errors remaining
 
 TASK TO EXECUTE:
 ${todo.title}
@@ -50,7 +56,7 @@ ${todo.description}
 
 ${codeSnippet}
 
-Remember: Execute immediately. No questions. No confirmations. Just do it. use --yes for commands where applicable                                                 `;
+Remember: Execute immediately. No questions. No confirmations. After completing the task, check for syntax errors and fix them if any exist. Use --yes for commands where applicable.`;
       return message;
     } catch (error) {
       console.error(`Failed to fetch todo: ${error.message}`);
