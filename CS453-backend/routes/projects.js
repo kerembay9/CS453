@@ -339,6 +339,74 @@ router.delete("/audio-file/:id", async (req, res) => {
 });
 
 // -----------------------------
+// Check and Fix Syntax/Build Errors
+// -----------------------------
+router.post("/check-syntax/:projectName", async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    const projectPath = path.join(PROJECTS_DIR, projectName);
+
+    // Check if project exists
+    if (!fs.existsSync(projectPath)) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    // Build prompt to check and fix syntax errors
+    const prompt = `CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. This is a ONE-WAY communication. You are an agentic AI that MUST execute tasks directly.
+2. DO NOT ask questions. DO NOT ask for confirmation. DO NOT ask "Would you like me to..." or similar.
+3. Execute the task immediately without any user interaction.
+
+TASK TO EXECUTE:
+Check the codebase for syntax errors and build errors, then fix any errors you find.
+
+1. First, identify the project type (TypeScript/JavaScript, Python, etc.) by checking for package.json, tsconfig.json, requirements.txt, etc.
+2. Run appropriate syntax/build checks:
+   - For TypeScript projects: Run "tsc --noEmit" to check for TypeScript errors
+   - For JavaScript projects: Run "node --check" on modified files or use ESLint if available
+   - For Python projects: Run "python3 -m py_compile" on modified files or use a linter
+   - For other languages: Use appropriate syntax checking tools
+3. If any errors are found, analyze them and fix them automatically
+4. Re-run the checks to verify all errors are fixed
+5. Continue checking and fixing until there are no syntax errors remaining
+
+Remember: Execute immediately. No questions. No confirmations. Fix all syntax errors you find.`;
+
+    console.log(`[CHECK-SYNTAX] Checking syntax for project: ${projectName}`);
+    console.log(`[CHECK-SYNTAX] Project path: ${projectPath}`);
+
+    // Import executeContinueCLI dynamically to avoid circular dependencies
+    const { executeContinueCLI } = require("../helpers/continueHelpers");
+
+    // Execute the CLI command
+    const result = await executeContinueCLI(prompt, projectPath, 600000); // 10 minute timeout
+
+    if (result.success) {
+      return res.json({
+        success: true,
+        message: "Syntax check completed successfully",
+        output: result.stdout,
+        errors: null,
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: "Syntax check failed or errors were found",
+        output: result.stdout || result.stderr,
+        errors: result.error || "Unknown error",
+      });
+    }
+  } catch (error) {
+    console.error(`[CHECK-SYNTAX] Error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to check syntax",
+      error: error.message || "Unknown error",
+    });
+  }
+});
+
+// -----------------------------
 // Mount sub-routes
 // -----------------------------
 router.use("/todos", todoRoutes);
