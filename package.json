@@ -1,0 +1,93 @@
+{
+  "name": "opsidian",
+  "version": "1.0.0",
+  "description": "Opsidian Desktop App",
+  "main": "electron/main.js",
+  "scripts": {
+    "electron": "electron .",
+    "electron:dev": "NODE_ENV=development electron .",
+    "build:frontend": "cd CS453-frontend && npm run build && cd .. && cp -r CS453-frontend/.next/static CS453-frontend/.next/standalone/CS453-frontend/.next/static && cp -r CS453-frontend/public CS453-frontend/.next/standalone/CS453-frontend/public",
+    "build:electron": "electron-builder --mac",
+    "build": "npm run build:frontend && npm run build:electron",
+    "postinstall": "cd CS453-backend && npm install && cd ../CS453-frontend && npm install"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "build": {
+    "appId": "com.opsidian.app",
+    "productName": "Opsidian",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "opsidian-desktop-logo.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "electron/entitlements.mac.plist",
+      "entitlementsInherit": "electron/entitlements.mac.plist"
+    },
+    "files": [
+      "electron/**/*",
+      "CS453-backend/**/*",
+      "!CS453-backend/node_modules/**/*",
+      "CS453-frontend/.next/**/*",
+      "CS453-frontend/public/**/*",
+      "CS453-frontend/package.json",
+      "package.json",
+      "opsidian-desktop-logo.png"
+    ],
+    "extraResources": [
+      {
+        "from": "CS453-backend",
+        "to": "CS453-backend",
+        "filter": [
+          "**/*",
+          "!*.log",
+          "!.DS_Store",
+          "!projects/**/*",
+          "!node_modules/.cache/**/*"
+        ]
+      },
+      {
+        "from": "CS453-frontend/.next/standalone",
+        "to": "CS453-frontend/.next/standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "CS453-frontend/.next/static",
+        "to": "CS453-frontend/.next/standalone/CS453-frontend/.next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "CS453-frontend/public",
+        "to": "CS453-frontend/.next/standalone/CS453-frontend/public",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "compression": "maximum"
+  }
+}
