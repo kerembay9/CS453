@@ -14,13 +14,24 @@ const projectRoutes = require("./routes/projects");
 
 app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(express.json());
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "fallback-secret",
-    resave: false,
-    saveUninitialized: false,
-  })
-);
+if (process.env.SESSION_SECRET !== undefined) {
+  app.use(
+    session({
+      secret: process.env.SESSION_SECRET,
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        secure: process.env.NODE_ENV === "production", // HTTPS only in production
+        httpOnly: true, // Prevents XSS attacks
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours
+        sameSite: "lax", // CSRF protection
+      },
+    })
+  );
+} else {
+  console.error("SESSION_SECRET is not set");
+  process.exit(1);
+}
 app.use(passport.initialize());
 app.use(passport.session());
 
