@@ -35,12 +35,20 @@ if (process.env.SESSION_SECRET !== undefined) {
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Require GitHub OAuth credentials
+if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+  console.error("GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET must be set");
+  process.exit(1);
+}
+
 passport.use(
   new GitHubStrategy(
     {
-      clientID: process.env.GITHUB_CLIENT_ID || "dummy",
-      clientSecret: process.env.GITHUB_CLIENT_SECRET || "dummy",
-      callbackURL: "http://localhost:3001/auth/github/callback",
+      clientID: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      callbackURL:
+        process.env.GITHUB_CALLBACK_URL ||
+        "http://localhost:3001/auth/github/callback",
     },
     (accessToken, refreshToken, profile, done) => {
       profile.accessToken = accessToken;
@@ -52,11 +60,19 @@ passport.use(
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
 
+// Authentication middleware - require user to be authenticated
+const requireAuth = (req, res, next) => {
+  if (req.isAuthenticated && req.isAuthenticated()) {
+    return next();
+  }
+  return res.status(401).json({ error: "Authentication required" });
+};
+
 app.get("/", (req, res) => res.send("Backend is running"));
 
 // Routes
 app.use("/auth", authRoutes);
-app.use("/api", projectRoutes);
+app.use("/api", requireAuth, projectRoutes);
 
 app.listen(3001, () => {
   console.log("Backend running on port 3001");
