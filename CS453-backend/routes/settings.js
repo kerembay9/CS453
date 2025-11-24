@@ -2,6 +2,8 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const { dbHelpers } = require("../db");
+const { updateConfigYaml } = require("../helpers/yamlConfig");
+const { CONTINUE_CONFIG_PATH } = require("../helpers/config");
 
 const router = express.Router();
 
@@ -82,8 +84,7 @@ router.put("/", async (req, res) => {
 
     if (shouldUpdateConfig) {
       try {
-        const configPath = path.join(__dirname, "../config.yaml");
-
+        // Get active provider
         let activeProvider = settings.active_api_provider;
         if (!activeProvider) {
           const activeProviderSetting = await dbHelpers.getSetting(
@@ -92,6 +93,7 @@ router.put("/", async (req, res) => {
           activeProvider = activeProviderSetting?.value || "gemini";
         }
 
+        // Get API key for the active provider
         let apiKey = "";
         if (activeProvider === "openai") {
           apiKey = settings.openai_api_key;
@@ -117,85 +119,34 @@ router.put("/", async (req, res) => {
           }
         }
 
-        if (fs.existsSync(configPath)) {
-          let configContent = fs.readFileSync(configPath, "utf8");
-
-          if (!configContent.includes('name: "Opsidian Configuration"')) {
-            configContent = configContent.replace(
-              /^name:\s*[^\n]+/m,
-              'name: "Opsidian Configuration"'
-            );
-          }
-
-          if (activeProvider === "openai") {
-            configContent = configContent.replace(
-              /(\s+provider:\s*)[^\n]+/,
-              `$1openai`
-            );
-            configContent = configContent.replace(
-              /(\s+model:\s*)[^\n]+/,
-              `$1gpt-4.1-nano-2025-04-14`
-            );
-            configContent = configContent.replace(
-              /(\s+- name:\s*)[^\n]+/,
-              `$1OpenAI GPT-4.1 nano`
-            );
-          } else {
-            configContent = configContent.replace(
-              /(\s+provider:\s*)[^\n]+/,
-              `$1gemini`
-            );
-            configContent = configContent.replace(
-              /(\s+model:\s*)[^\n]+/,
-              `$1gemini-2.0-flash-exp`
-            );
-            configContent = configContent.replace(
-              /(\s+- name:\s*)[^\n]+/,
-              `$1Gemini-flash`
-            );
-          }
-
-          configContent = configContent.replace(
-            /(\s+apiKey:\s*)"[^"]*"/,
-            `$1"${apiKey}"`
+        // Validate API key is present
+        if (!apiKey) {
+          console.warn(
+            "[SETTINGS] No API key found for provider:",
+            activeProvider
           );
-
-          fs.writeFileSync(configPath, configContent, "utf8");
-          console.log(`Updated config.yaml with ${activeProvider} API key`);
         } else {
-          const yamlContent =
+          // Use safe YAML update with atomic writes
+          const model =
             activeProvider === "openai"
-              ? `name: "Opsidian Configuration"
-version: "1.0"
-schema: v1
-models:
-  - name: OpenAI GPT-4.1 nano
-    provider: openai
-    model: gpt-4.1-nano-2025-04-14
-    apiKey: "${apiKey}"
-    roles:
-      - chat
-      - autocomplete
-`
-              : `name: "Opsidian Configuration"
-version: "1.0"
-schema: v1
-models:
-  - name: Gemini-flash
-    provider: gemini
-    model: gemini-2.0-flash-exp
-    apiKey: "${apiKey}"
-    roles:
-      - chat
-      - autocomplete
-`;
-          fs.writeFileSync(configPath, yamlContent, "utf8");
-          console.log(
-            `Created config.yaml with ${activeProvider} configuration`
-          );
+              ? "gpt-4.1-nano-2025-04-14"
+              : "gemini-2.0-flash-exp";
+          const modelName =
+            activeProvider === "openai"
+              ? "OpenAI GPT-4.1 nano"
+              : "Gemini-flash";
+
+          await updateConfigYaml(CONTINUE_CONFIG_PATH, {
+            provider: activeProvider,
+            model: model,
+            apiKey: apiKey,
+            name: modelName,
+          });
         }
       } catch (configError) {
-        console.error("Error updating config.yaml:", configError);
+        console.error("[SETTINGS] Error updating config.yaml:", configError);
+        // Don't fail the entire request if config update fails
+        // The settings are still saved in the database
       }
     }
 

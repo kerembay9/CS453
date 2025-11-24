@@ -11,8 +11,9 @@ const NodeFormData = require("form-data");
 const { dbHelpers } = require("../db");
 
 // Import helpers
-const { PROJECTS_DIR, UPLOADS_DIR } = require("../helpers/config");
+const { PROJECTS_DIR, UPLOADS_DIR, N8N_WEBHOOK_URL, N8N_WEBHOOK_SECRET } = require("../helpers/config");
 const { sanitizeName, moveFile, ensureDirs } = require("../helpers/utils");
+const { webhookSignatureMiddleware } = require("../helpers/webhookVerification");
 
 // Import sub-routes
 const todoRoutes = require("./todo");
@@ -323,8 +324,17 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
       contentType: "audio/mpeg",
     });
 
+    // Use configurable webhook URL
+    if (!N8N_WEBHOOK_URL) {
+      await dbHelpers.updateTranscription(audioFileId, null, "failed");
+      return res.status(500).json({
+        error: "N8N webhook URL not configured",
+        message: "Please set N8N_WEBHOOK_URL environment variable",
+      });
+    }
+
     const webhookResponse = await axios.post(
-      "http://localhost:5678/webhook-test/ec52a91a-54e0-47a2-afa3-f191c87c7043",
+      N8N_WEBHOOK_URL,
       form,
       {
         headers: {
@@ -407,12 +417,22 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
 // -----------------------------
 // N8N Webhook Callback for Transcription Results
 // -----------------------------
+// Use raw body parser for signature verification, then parse JSON manually
 router.post(
   "/webhook/transcription-complete",
-  express.json(),
+  express.raw({ type: "application/json" }),
+  webhookSignatureMiddleware(N8N_WEBHOOK_SECRET),
   async (req, res) => {
     try {
-      const { audioFileId, transcriptionText, status, error } = req.body;
+      // Parse JSON from raw body after signature verification
+      let body;
+      try {
+        body = JSON.parse(req.body.toString());
+      } catch (parseError) {
+        return res.status(400).json({ error: "Invalid JSON in request body" });
+      }
+
+      const { audioFileId, transcriptionText, status, error } = body;
 
       if (!audioFileId) {
         return res.status(400).json({ error: "Missing audioFileId" });
