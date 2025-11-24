@@ -1,6 +1,6 @@
 // routes.js
 const express = require("express");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
 const fsp = require("fs/promises");
@@ -26,6 +26,104 @@ const execAsync = promisify(exec);
 // Ensure base dirs exist
 ensureDirs().catch(console.error);
 
+// Validation functions
+function isValidGitUrl(url) {
+  if (typeof url !== "string" || url.length === 0 || url.length > 2048) {
+    return false;
+  }
+  // Allow http, https, git, and ssh URLs
+  const gitUrlPattern = /^(https?:\/\/|git@|git:\/\/)[\w\.-]+(?:\/[\w\.-]+)*\/?[\w\.-]+(?:\.git)?$/;
+  return gitUrlPattern.test(url.trim());
+}
+
+function sanitizeFileName(filename) {
+  if (typeof filename !== "string" || filename.length === 0) {
+    throw new Error("Invalid filename");
+  }
+  
+  // Remove path separators and dangerous characters
+  // Keep only alphanumeric, dots, hyphens, underscores, and common file extensions
+  const sanitized = filename
+    .replace(/[\/\\]/g, "") // Remove path separators
+    .replace(/[^a-zA-Z0-9._-]/g, "_") // Replace unsafe chars with underscore
+    .replace(/^\.+/, "") // Remove leading dots (hidden files)
+    .slice(0, 255); // Limit length (max filesystem filename length)
+  
+  if (!sanitized || sanitized.length === 0) {
+    throw new Error("Filename sanitization resulted in empty string");
+  }
+  
+  return sanitized;
+}
+
+function ensureFileWithinProjectDir(projectPath, filename) {
+  // Sanitize filename
+  const sanitizedFilename = sanitizeFileName(filename);
+  
+  // Resolve to absolute path
+  const resolvedProjectPath = path.resolve(projectPath);
+  const resolvedFilePath = path.resolve(projectPath, sanitizedFilename);
+  
+  // Ensure file path is within project directory (prevent directory traversal)
+  if (!resolvedFilePath.startsWith(resolvedProjectPath)) {
+    throw new Error("Path traversal detected in filename");
+  }
+  
+  return { sanitizedFilename, resolvedFilePath };
+}
+
+function ensurePathWithinProjectsDir(projectName) {
+  // Sanitize the project name
+  const sanitized = sanitizeName(projectName);
+  if (!sanitized || sanitized.length === 0) {
+    throw new Error("Invalid project name");
+  }
+  
+  // Resolve to absolute path and ensure it's within PROJECTS_DIR
+  const resolvedPath = path.resolve(PROJECTS_DIR, sanitized);
+  const projectsDirResolved = path.resolve(PROJECTS_DIR);
+  
+  // Check for path traversal
+  if (!resolvedPath.startsWith(projectsDirResolved)) {
+    throw new Error("Path traversal detected");
+  }
+  
+  return { sanitized, resolvedPath };
+}
+
+// Safe git clone using spawn (no shell injection)
+function safeGitClone(repoUrl, targetPath) {
+  return new Promise((resolve, reject) => {
+    const gitProcess = spawn("git", ["clone", repoUrl, targetPath], {
+      cwd: PROJECTS_DIR,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    gitProcess.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    gitProcess.stderr.on("data", (data) => {
+      stderr += data.toString();
+    });
+
+    gitProcess.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`git clone failed with code ${code}: ${stderr || stdout}`));
+      }
+    });
+
+    gitProcess.on("error", (error) => {
+      reject(new Error(`Failed to spawn git process: ${error.message}`));
+    });
+  });
+}
+
 // -----------------------------
 // Multer (temp storage)
 // -----------------------------
@@ -43,19 +141,50 @@ const upload = multer({
 router.post("/clone-repo", express.json(), async (req, res) => {
   try {
     const { repoUrl, repoName } = req.body || {};
+    
+    // Validate inputs
     if (!repoUrl || !repoName) {
       return res.status(400).json({ error: "Missing repoUrl or repoName" });
     }
+
+    // Validate git URL format
+    if (!isValidGitUrl(repoUrl)) {
+      return res.status(400).json({ 
+        error: "Invalid git URL format. Must be http, https, git, or ssh URL" 
+      });
+    }
+
+    // Sanitize and validate project name, ensure path safety
+    let sanitized, repoPath;
+    try {
+      const pathInfo = ensurePathWithinProjectsDir(repoName);
+      sanitized = pathInfo.sanitized;
+      repoPath = pathInfo.resolvedPath;
+    } catch (pathError) {
+      return res.status(400).json({ error: pathError.message });
+    }
+
     await ensureDirs();
-    const repoPath = path.join(PROJECTS_DIR, repoName);
+
+    // Check if repository already exists
     if (fs.existsSync(repoPath)) {
       return res.status(400).json({ error: "Repository already exists" });
     }
-    await execAsync(`git clone ${repoUrl} "${repoPath}"`);
-    res.json({ success: true, message: "Repository cloned successfully" });
+
+    // Use safe git clone (no shell injection)
+    await safeGitClone(repoUrl.trim(), repoPath);
+    
+    res.json({ 
+      success: true, 
+      message: "Repository cloned successfully",
+      projectName: sanitized 
+    });
   } catch (error) {
     console.error("clone-repo error:", error);
-    res.status(500).json({ error: "Failed to clone repository" });
+    res.status(500).json({ 
+      error: "Failed to clone repository",
+      details: error.message 
+    });
   }
 });
 
@@ -78,20 +207,36 @@ router.get("/", async (_req, res) => {
 // Delete project
 // -----------------------------
 router.delete("/", express.json(), async (req, res) => {
-  const { projectName } = req.body || {};
-  if (!projectName)
-    return res.status(400).json({ error: "Missing projectName" });
-
-  const projectPath = path.join(PROJECTS_DIR, projectName);
-  if (!fs.existsSync(projectPath)) {
-    return res.status(404).json({ error: "Project not found" });
-  }
   try {
-    await execAsync(`rm -rf "${projectPath}"`);
-    res.json({ success: true });
+    const { projectName } = req.body || {};
+    if (!projectName) {
+      return res.status(400).json({ error: "Missing projectName" });
+    }
+
+    // Sanitize and validate project name, ensure path safety
+    let projectPath;
+    try {
+      const pathInfo = ensurePathWithinProjectsDir(projectName);
+      projectPath = pathInfo.resolvedPath;
+    } catch (pathError) {
+      return res.status(400).json({ error: pathError.message });
+    }
+
+    // Check if project exists
+    if (!fs.existsSync(projectPath)) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    // Use fs.rm instead of shell command (no command injection)
+    await fsp.rm(projectPath, { recursive: true, force: true });
+    
+    res.json({ success: true, message: "Project deleted successfully" });
   } catch (error) {
     console.error("delete error:", error);
-    res.status(500).json({ error: "Failed to delete project" });
+    res.status(500).json({ 
+      error: "Failed to delete project",
+      details: error.message 
+    });
   }
 });
 
@@ -112,31 +257,67 @@ router.post("/upload-audio", upload.single("audio"), async (req, res) => {
     return res.status(400).json({ error: "Missing file or project name" });
   }
 
-  const projectName = sanitizeName(projectNameRaw);
-  const projectPath = path.join(PROJECTS_DIR, projectName);
-  const finalPath = path.join(projectPath, file.originalname);
+  // Validate and sanitize project name, ensure path safety
+  let projectName, projectPath;
+  try {
+    const pathInfo = ensurePathWithinProjectsDir(projectNameRaw);
+    projectName = pathInfo.sanitized;
+    projectPath = pathInfo.resolvedPath;
+  } catch (pathError) {
+    if (file?.path) {
+      try {
+        await fsp.unlink(file.path);
+      } catch {}
+    }
+    return res.status(400).json({ error: pathError.message });
+  }
+
+  // Validate that project exists (don't create projects implicitly)
+  if (!fs.existsSync(projectPath)) {
+    if (file?.path) {
+      try {
+        await fsp.unlink(file.path);
+      } catch {}
+    }
+    return res.status(404).json({ error: "Project does not exist. Please create it first." });
+  }
+
+  // Sanitize filename and ensure it stays within project directory
+  let sanitizedFilename, finalPath;
+  try {
+    const fileInfo = ensureFileWithinProjectDir(projectPath, file.originalname);
+    sanitizedFilename = fileInfo.sanitizedFilename;
+    finalPath = fileInfo.resolvedFilePath;
+  } catch (fileError) {
+    if (file?.path) {
+      try {
+        await fsp.unlink(file.path);
+      } catch {}
+    }
+    return res.status(400).json({ error: fileError.message });
+  }
 
   try {
     await moveFile(file.path, finalPath);
 
-    // Create database record for the audio file
+    // Create database record for the audio file (use sanitized filename)
     const audioFileId = await dbHelpers.insertAudioFile(
       projectName,
-      file.originalname,
+      sanitizedFilename,
       finalPath
     );
 
     // Use axios instead of fetch for better FormData support
     const form = new NodeFormData();
     form.append("audio", fs.createReadStream(finalPath), {
-      filename: path.basename(finalPath),
+      filename: sanitizedFilename,
       contentType: "audio/mpeg", // change if not mp3
     });
     form.append("projectName", projectName);
     form.append("audioFileId", audioFileId.toString()); // Include ID for webhook callback
 
     console.log("FormData created with:", {
-      audioFile: path.basename(finalPath),
+      audioFile: sanitizedFilename,
       projectName: projectName,
       audioFileId: audioFileId,
       contentType: "audio/mpeg",

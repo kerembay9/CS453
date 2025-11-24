@@ -11,6 +11,7 @@ const {
   detectQuotaError,
   executeCodeWithContinue,
 } = require("../helpers/continueHelpers");
+const { executionLockManager } = require("../helpers/executionLock");
 
 const router = express.Router();
 const execAsync = promisify(exec);
@@ -18,6 +19,8 @@ const execAsync = promisify(exec);
 // Execute a single todo (code or command)
 router.post("/execute-todo/:todoId", async (req, res) => {
   const todoId = req.params.todoId;
+  let lockAcquired = false;
+  let projectName = null;
 
   try {
     const todo = await dbHelpers.getTodoById(todoId);
@@ -32,12 +35,27 @@ router.post("/execute-todo/:todoId", async (req, res) => {
         .json({ error: "No code snippet or command to execute" });
     }
 
-    const projectPath = path.join(PROJECTS_DIR, todo.project_name);
+    projectName = todo.project_name;
+    const projectPath = path.join(PROJECTS_DIR, projectName);
 
     // Ensure project directory exists
     if (!fs.existsSync(projectPath)) {
       return res.status(404).json({ error: "Project directory not found" });
     }
+
+    // Acquire execution lock to prevent concurrent executions
+    if (!executionLockManager.acquireLock(projectName, `todo-${todoId}`)) {
+      const lockInfo = executionLockManager.getLockInfo(projectName);
+      return res.status(409).json({
+        error: "Another execution is already in progress for this project",
+        details: lockInfo
+          ? `Execution ${lockInfo.executionId} started ${Math.floor(
+              (Date.now() - lockInfo.acquiredAt) / 1000
+            )} seconds ago`
+          : "Unknown execution in progress",
+      });
+    }
+    lockAcquired = true;
 
     // Create git checkpoint before execution
     let gitCommitHash = null;
@@ -150,14 +168,24 @@ router.post("/execute-todo/:todoId", async (req, res) => {
       details: error.message,
       todoId: todoId,
     });
+  } finally {
+    // Always release the lock
+    if (lockAcquired && projectName) {
+      try {
+        executionLockManager.releaseLock(projectName, `todo-${todoId}`);
+      } catch (releaseError) {
+        console.error("[EXECUTE-TODO] Error releasing lock:", releaseError);
+      }
+    }
   }
 });
 
 // Execute code for all todos in a project
 router.post("/execute-all-todos/:projectName", async (req, res) => {
-  try {
-    const { projectName } = req.params;
+  const { projectName } = req.params;
+  let lockAcquired = false;
 
+  try {
     const todos = await dbHelpers.getTodosByProject(projectName);
     const todosWithCode = todos.filter((todo) => todo.code_snippet);
 
@@ -173,6 +201,20 @@ router.post("/execute-all-todos/:projectName", async (req, res) => {
     if (!fs.existsSync(projectPath)) {
       return res.status(404).json({ error: "Project directory not found" });
     }
+
+    // Acquire execution lock to prevent concurrent executions
+    if (!executionLockManager.acquireLock(projectName, `execute-all-${projectName}`)) {
+      const lockInfo = executionLockManager.getLockInfo(projectName);
+      return res.status(409).json({
+        error: "Another execution is already in progress for this project",
+        details: lockInfo
+          ? `Execution ${lockInfo.executionId} started ${Math.floor(
+              (Date.now() - lockInfo.acquiredAt) / 1000
+            )} seconds ago`
+          : "Unknown execution in progress",
+      });
+    }
+    lockAcquired = true;
 
     // Create git checkpoint before executing all todos
     let gitCommitHash = null;
@@ -229,6 +271,15 @@ router.post("/execute-all-todos/:projectName", async (req, res) => {
   } catch (error) {
     console.error("Execute all todos error:", error);
     res.status(500).json({ error: "Failed to execute all todos" });
+  } finally {
+    // Always release the lock
+    if (lockAcquired) {
+      try {
+        executionLockManager.releaseLock(projectName, `execute-all-${projectName}`);
+      } catch (releaseError) {
+        console.error("[EXECUTE-ALL-TODOS] Error releasing lock:", releaseError);
+      }
+    }
   }
 });
 

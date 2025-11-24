@@ -4,14 +4,17 @@ const { dbHelpers } = require("../db");
 const { PROJECTS_DIR, CONTINUE_CONFIG_PATH } = require("../helpers/config");
 const { buildCodebaseContext } = require("../helpers/codebaseContext");
 const { ScreenContinueConnection } = require("../helpers/screenContinue");
+const { executionLockManager } = require("../helpers/executionLock");
 
 const router = express.Router();
 
 // Generate todos from audio transcription
 router.post("/generate-todos/:audioFileId", async (req, res) => {
-  try {
-    const { audioFileId } = req.params;
+  const { audioFileId } = req.params;
+  let lockAcquired = false;
+  let projectName = null;
 
+  try {
     // Get audio file record
     const audioFile = await dbHelpers.getAudioFileById(audioFileId);
     if (!audioFile) {
@@ -24,8 +27,24 @@ router.post("/generate-todos/:audioFileId", async (req, res) => {
         .json({ error: "No transcription available for this audio file" });
     }
 
+    projectName = audioFile.project_name;
+
+    // Acquire execution lock to prevent concurrent executions
+    if (!executionLockManager.acquireLock(projectName, `generate-todos-${audioFileId}`)) {
+      const lockInfo = executionLockManager.getLockInfo(projectName);
+      return res.status(409).json({
+        error: "Another execution is already in progress for this project",
+        details: lockInfo
+          ? `Execution ${lockInfo.executionId} started ${Math.floor(
+              (Date.now() - lockInfo.acquiredAt) / 1000
+            )} seconds ago`
+          : "Unknown execution in progress",
+      });
+    }
+    lockAcquired = true;
+
     // Build codebase context
-    const projectPath = path.join(PROJECTS_DIR, audioFile.project_name);
+    const projectPath = path.join(PROJECTS_DIR, projectName);
     const codebaseContext = await buildCodebaseContext(projectPath);
 
     // Create prompt for Continue.dev
@@ -210,6 +229,15 @@ Return only a JSON array of todos.`;
   } catch (error) {
     console.error("Generate todos error:", error);
     res.status(500).json({ error: "Failed to generate todos" });
+  } finally {
+    // Always release the lock
+    if (lockAcquired && projectName) {
+      try {
+        executionLockManager.releaseLock(projectName, `generate-todos-${audioFileId}`);
+      } catch (releaseError) {
+        console.error("[GENERATE-TODOS] Error releasing lock:", releaseError);
+      }
+    }
   }
 });
 
