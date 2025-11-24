@@ -41,6 +41,9 @@
       "entitlements": "electron/entitlements.mac.plist",
       "entitlementsInherit": "electron/entitlements.mac.plist"
     },
+    "dmg": {
+      "format": "ULFO"
+    },
     "files": [
       "electron/**/*",
       "CS453-backend/**/*",

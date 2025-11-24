@@ -349,6 +349,7 @@ function createWindow() {
       contextIsolation: true,
       webSecurity: true,
       allowRunningInsecureContent: false,
+      webviewTag: true, // Allow webview tags for iframes
     },
     icon: iconPath,
     title: "Opsidian",
@@ -356,13 +357,13 @@ function createWindow() {
 
   // Allow navigation and redirects
   mainWindow.webContents.on("will-navigate", (event, navigationUrl) => {
-    // Allow navigation to localhost (our frontend server)
+    // Allow navigation to localhost (our frontend server and n8n)
     const parsedUrl = new URL(navigationUrl);
     if (
       parsedUrl.hostname === "localhost" ||
       parsedUrl.hostname === "127.0.0.1"
     ) {
-      // Allow navigation within localhost
+      // Allow navigation within localhost (including n8n at port 5678)
       return;
     }
     // Allow GitHub OAuth flow
@@ -379,13 +380,13 @@ function createWindow() {
 
   // Allow redirects
   mainWindow.webContents.on("will-redirect", (event, navigationUrl) => {
-    // Allow redirects to localhost
+    // Allow redirects to localhost (including n8n at port 5678)
     const parsedUrl = new URL(navigationUrl);
     if (
       parsedUrl.hostname === "localhost" ||
       parsedUrl.hostname === "127.0.0.1"
     ) {
-      // Allow redirect within localhost
+      // Allow redirect within localhost (including n8n at port 5678)
       return;
     }
     // Allow GitHub OAuth redirects
@@ -404,7 +405,6 @@ function createWindow() {
   mainWindow.loadURL(`http://localhost:${FRONTEND_PORT}/admin/login`);
 
   // Open DevTools only in development mode
-  const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
   if (isDev) {
     mainWindow.webContents.openDevTools();
   }
