@@ -126,15 +126,37 @@ function safeGitClone(repoUrl, targetPath) {
 }
 
 // -----------------------------
-// Multer (temp storage)
+// Multer (temp storage) - Dynamic based on settings
 // -----------------------------
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-    filename: (_req, file, cb) => cb(null, file.originalname),
-  }),
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
-});
+const getUploadMiddleware = async () => {
+  try {
+    const fileUploadLimitSetting = await dbHelpers.getSetting("file_upload_limit_mb");
+    const fileUploadLimitMB = fileUploadLimitSetting?.value 
+      ? parseInt(fileUploadLimitSetting.value) 
+      : 100; // Default to 100MB if not set
+    
+    const limitMB = Math.max(1, Math.min(fileUploadLimitMB, 1000)); // Clamp between 1-1000MB
+    const fileSizeLimit = limitMB * 1024 * 1024; // Convert to bytes
+    
+    return multer({
+      storage: multer.diskStorage({
+        destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+        filename: (_req, file, cb) => cb(null, file.originalname),
+      }),
+      limits: { fileSize: fileSizeLimit },
+    });
+  } catch (error) {
+    console.error("Error getting upload limit from settings, using default 100MB:", error);
+    // Fallback to default 100MB
+    return multer({
+      storage: multer.diskStorage({
+        destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+        filename: (_req, file, cb) => cb(null, file.originalname),
+      }),
+      limits: { fileSize: 100 * 1024 * 1024 }, // 100MB default
+    });
+  }
+};
 
 // -----------------------------
 // Clone repository
@@ -245,7 +267,14 @@ router.delete("/", express.json(), async (req, res) => {
 // Upload audio → forward to n8n
 // If mounted at app.use("/api", router), path is /api/upload-audio
 // -----------------------------
-router.post("/upload-audio", upload.single("audio"), async (req, res) => {
+router.post("/upload-audio", async (req, res, next) => {
+  try {
+    const upload = await getUploadMiddleware();
+    upload.single("audio")(req, res, next);
+  } catch (error) {
+    next(error);
+  }
+}, async (req, res) => {
   const projectNameRaw = req.body?.projectName;
   const file = req.file;
 

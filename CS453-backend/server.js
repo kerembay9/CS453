@@ -72,11 +72,13 @@ app.get("/", (req, res) => res.send("Backend is running"));
 
 // Routes
 app.use("/auth", authRoutes);
-app.use("/api", requireAuth, projectRoutes);
+app.use("/api", projectRoutes);
 
 app.listen(3001, () => {
   console.log("Backend running on port 3001");
   console.log(
     "Screen session 'opsidian-continue' will be created per-project when executing todos"
   );
+  // log the environment variables
+  console.log("Environment variables:", process.env);
 });
