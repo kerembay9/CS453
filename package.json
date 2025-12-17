@@ -9,6 +9,7 @@
     "build:frontend": "cd CS453-frontend && npm run build && cd .. && cp -r CS453-frontend/.next/static CS453-frontend/.next/standalone/CS453-frontend/.next/static && cp -r CS453-frontend/public CS453-frontend/.next/standalone/CS453-frontend/public",
     "build:electron": "electron-builder --mac",
     "build": "npm run build:frontend && npm run build:electron",
+    "check:signing": "node scripts/check-signing.js",
     "postinstall": "cd CS453-backend && npm install && cd ../CS453-frontend && npm install"
   },
   "keywords": [],
@@ -39,7 +40,8 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "electron/entitlements.mac.plist",
-      "entitlementsInherit": "electron/entitlements.mac.plist"
+      "entitlementsInherit": "electron/entitlements.mac.plist",
+      "identity": null
     },
     "dmg": {
       "format": "ULFO"

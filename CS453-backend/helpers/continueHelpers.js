@@ -186,16 +186,26 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     // Change to project directory, then run node directly with absolute paths
     // This ensures the config path is always absolute and works regardless of working directory
     // We use node directly instead of npm start to have full control over the config path
-    const escapedIndexPath = path.join(continueCliPath, "index.js")
-      .replace(/"/g, '\\"')
-      .replace(/\$/g, "\\$");
+    const indexPath = path.join(continueCliPath, "index.js");
     
-    let command = `cd "${escapedProjectPath}" && node "${escapedIndexPath}" --config "${escapedConfigPath}"`;
+    // Build command arguments - pass prompt as command-line argument to avoid stdin timing issues
+    // Use spawn with array of arguments to avoid shell escaping issues
+    const nodeArgs = [
+      indexPath,
+      "--config",
+      configFilePath,
+      "--auto", // Enable auto mode to allow all file modifications without permission prompts
+    ];
+    
+    // Add prompt as argument if provided
+    // The CLI expects the prompt as the first positional argument
+    if (prompt && prompt.trim()) {
+      nodeArgs.push(prompt);
+    }
 
-    // Spawn shell process
-    // The subshell will change to project directory, and the CLI script will run there
-    // We pass CONTINUE_PROJECT_PATH so the CLI can change to it if needed
-    const shellProcess = spawn("sh", ["-c", command], {
+    // Spawn process directly with node, avoiding shell command string
+    // This ensures proper argument handling without shell escaping issues
+    const shellProcess = spawn("node", nodeArgs, {
       cwd: projectPath, // Start in project directory
       env: {
         ...process.env,
@@ -213,15 +223,13 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     let stderr = "";
     let timeoutId = null;
 
-    // Write prompt to stdin after a short delay to ensure process is ready
-    // The CLI will read from stdin if no prompt argument is provided
-    // The CLI uses readStdinSync() which reads synchronously, so we need stdin to be ready
-    // Use a small timeout to ensure the process is fully spawned and initialized
+    // Log command details for debugging
+    const commandStr = `node ${nodeArgs.join(" ")}`;
     console.log(
-      `[CLI] Spawning process with command: ${command.substring(0, 200)}...`
+      `[CLI] Spawning process with command: ${commandStr.substring(0, 200)}...`
     );
     console.log(`[CLI] Project path: ${projectPath}`);
-    console.log(`[CLI] Config path: ${CONTINUE_CONFIG_PATH || "none"}`);
+    console.log(`[CLI] Config path: ${configFilePath}`);
     console.log(`[CLI] Prompt length: ${prompt ? prompt.length : 0}`);
     if (prompt) {
       console.log(`[CLI] Full prompt:\n${prompt}`);
@@ -229,44 +237,8 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       console.log(`[CLI] No prompt provided`);
     }
 
-    setTimeout(() => {
-      if (shellProcess.killed) {
-        console.error("[CLI] Process already killed before writing stdin");
-        return;
-      }
-
-      if (prompt && prompt.trim()) {
-        try {
-          console.log("[CLI] Writing prompt to stdin...");
-          // Write prompt to stdin and end it immediately
-          // This ensures the CLI can read it when it calls readStdinSync()
-          const written = shellProcess.stdin.write(prompt);
-          if (!written) {
-            console.log("[CLI] Stdin buffer full, waiting for drain...");
-            // If write returns false, wait for drain event
-            shellProcess.stdin.once("drain", () => {
-              console.log("[CLI] Stdin drained, closing...");
-              shellProcess.stdin.end();
-            });
-          } else {
-            console.log("[CLI] Prompt written, closing stdin...");
-            shellProcess.stdin.end();
-          }
-        } catch (err) {
-          // If writing fails, still try to end stdin
-          try {
-            shellProcess.stdin.end();
-          } catch (e) {
-            // Ignore errors on ending
-          }
-          console.error("[CLI] Error writing to stdin:", err);
-        }
-      } else {
-        console.log("[CLI] No prompt, closing stdin immediately");
-        // No prompt, just close stdin immediately
-        shellProcess.stdin.end();
-      }
-    }, 100); // Small delay to ensure process is ready
+    // Close stdin immediately since we're passing prompt as argument
+    shellProcess.stdin.end();
 
     // Collect stdout with real-time logging for debugging
     shellProcess.stdout.on("data", (data) => {
