@@ -1,9 +1,9 @@
 const express = require("express");
 const path = require("path");
 const { dbHelpers } = require("../db");
-const { PROJECTS_DIR, CONTINUE_CONFIG_PATH } = require("../helpers/config");
+const { PROJECTS_DIR } = require("../helpers/config");
 const { buildCodebaseContext } = require("../helpers/codebaseContext");
-const { ScreenContinueConnection } = require("../helpers/screenContinue");
+const { executeContinueCLI } = require("../helpers/continueHelpers");
 const { executionLockManager } = require("../helpers/executionLock");
 
 const router = express.Router();
@@ -77,20 +77,11 @@ Format each todo as JSON:
 
 Return only a JSON array of todos.`;
 
-    // Execute Continue.dev CLI command via screen session
-    console.log(`[GENERATE-TODOS] Executing Continue.dev CLI via screen...`);
+    // Execute Continue.dev CLI command directly
+    console.log(`[GENERATE-TODOS] Executing Continue.dev CLI...`);
 
     let stdout;
     try {
-      // Create screen connection for this project
-      const connection = new ScreenContinueConnection(
-        CONTINUE_CONFIG_PATH,
-        projectPath
-      );
-
-      // Session is created at server startup, just verify it exists
-      await connection.ensureScreenSession();
-
       // Get timeout from database settings, default to 5 minutes (300000ms)
       let timeout = 300000;
       try {
@@ -102,9 +93,8 @@ Return only a JSON array of todos.`;
         console.warn("Failed to get continue_timeout setting, using default:", error);
       }
 
-      // Send prompt and wait for response
-      console.log("hata burada herhal")
-      const result = await connection.sendMessageAndWait(prompt, timeout);
+      // Execute CLI directly with prompt
+      const result = await executeContinueCLI(prompt, projectPath, timeout);
       stdout = result.stdout || "";
 
       // Check for authentication errors
@@ -118,21 +108,21 @@ Return only a JSON array of todos.`;
             "Continue.dev API authentication failed. Please check your API key in settings.",
         });
       }
+    } catch (error) {
+      const errorOutput = error.stderr || error.stdout || error.message || "";
+      console.error(`[GENERATE-TODOS] Continue.dev error:`, errorOutput);
 
-      // Check if execution failed
-      if (!result.success && result.error) {
-        console.error(`[GENERATE-TODOS] Continue.dev error:`, result.error);
-        return res.status(500).json({
-          error: "Failed to generate todos. Continue.dev CLI error.",
-          details: result.error.substring(0, 500),
+      // Check for quota/rate limit errors
+      if (error.code === "QUOTA_ERROR") {
+        return res.status(429).json({
+          error: "API rate limit/quota exceeded. Please try again later.",
+          details: error.message,
         });
       }
-    } catch (error) {
-      const errorOutput = error.message || "";
-      console.error(`[GENERATE-TODOS] Continue.dev error:`, errorOutput);
 
       // Check for authentication errors
       if (
+        error.code === "AUTH_ERROR" ||
         errorOutput.includes("x-api-key") ||
         errorOutput.includes("authentication_error") ||
         errorOutput.includes("invalid")
@@ -162,20 +152,93 @@ Return only a JSON array of todos.`;
     }
 
     // Try to extract JSON array from response
+    // The CLI may output streaming text before the final JSON, so we need to find the last complete JSON array
     let todos = [];
     try {
-      // Try to find JSON array in the response
-      const jsonArrayMatch = stdout.match(/\[[\s\S]*\]/);
-      if (jsonArrayMatch) {
-        todos = JSON.parse(jsonArrayMatch[0]);
-      } else {
-        // Try to find multiple JSON objects
-        const jsonObjectMatches = stdout.match(/\{[\s\S]*?\}/g);
-        if (jsonObjectMatches) {
-          todos = jsonObjectMatches.map((match) => JSON.parse(match));
-        } else {
-          // Try to parse entire stdout as JSON
-          todos = JSON.parse(stdout);
+      // Strategy: Find the last complete JSON array by searching backwards from the end
+      // This handles cases where there's streaming output before the final JSON
+      
+      // Find the last closing bracket
+      const lastClosingBracket = stdout.lastIndexOf(']');
+      if (lastClosingBracket === -1) {
+        throw new Error("No JSON array found in response");
+      }
+      
+      // Work backwards to find the matching opening bracket
+      let bracketCount = 0;
+      let startIndex = -1;
+      for (let i = lastClosingBracket; i >= 0; i--) {
+        if (stdout[i] === ']') bracketCount++;
+        if (stdout[i] === '[') {
+          bracketCount--;
+          if (bracketCount === 0) {
+            startIndex = i;
+            break;
+          }
+        }
+      }
+      
+      if (startIndex === -1) {
+        throw new Error("Could not find matching opening bracket for JSON array");
+      }
+      
+      // Extract and parse the JSON array
+      const jsonCandidate = stdout.substring(startIndex, lastClosingBracket + 1);
+      try {
+        todos = JSON.parse(jsonCandidate);
+        if (!Array.isArray(todos)) {
+          throw new Error("Parsed JSON is not an array");
+        }
+      } catch (parseError) {
+        // If parsing fails, try alternative methods
+        console.warn(`[GENERATE-TODOS] Failed to parse extracted JSON, trying alternatives:`, parseError.message);
+        
+        // Try finding all JSON arrays and use the last valid one
+        const jsonArrayMatches = stdout.match(/\[[\s\S]*?\]/g);
+        if (jsonArrayMatches && jsonArrayMatches.length > 0) {
+          // Try parsing from the end backwards
+          for (let i = jsonArrayMatches.length - 1; i >= 0; i--) {
+            try {
+              const parsed = JSON.parse(jsonArrayMatches[i]);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                todos = parsed;
+                break;
+              }
+            } catch (e) {
+              // Continue to next match
+            }
+          }
+        }
+        
+        // If still no valid array, try finding individual JSON objects
+        if (todos.length === 0) {
+          const jsonObjectMatches = stdout.match(/\{[\s\S]*?\}/g);
+          if (jsonObjectMatches) {
+            const parsedObjects = [];
+            for (const match of jsonObjectMatches) {
+              try {
+                const parsed = JSON.parse(match);
+                if (parsed && typeof parsed === 'object' && parsed.title) {
+                  parsedObjects.push(parsed);
+                }
+              } catch (e) {
+                // Skip invalid JSON objects
+              }
+            }
+            if (parsedObjects.length > 0) {
+              todos = parsedObjects;
+            }
+          }
+        }
+        
+        // Last resort: try parsing entire stdout
+        if (todos.length === 0) {
+          try {
+            const parsed = JSON.parse(stdout.trim());
+            todos = Array.isArray(parsed) ? parsed : [parsed];
+          } catch (e) {
+            throw new Error(`Could not extract valid JSON from response: ${parseError.message}`);
+          }
         }
       }
 
@@ -185,10 +248,12 @@ Return only a JSON array of todos.`;
       }
     } catch (parseError) {
       console.error(`[GENERATE-TODOS] JSON parse error:`, parseError.message);
-      console.error(`[GENERATE-TODOS] Raw stdout:`, stdout.substring(0, 1000));
+      console.error(`[GENERATE-TODOS] Raw stdout length:`, stdout.length);
+      console.error(`[GENERATE-TODOS] Raw stdout (last 2000 chars):`, stdout.substring(Math.max(0, stdout.length - 2000)));
       return res.status(500).json({
         error: "Failed to parse todos from Continue.dev response",
-        details: stdout.substring(0, 500),
+        details: parseError.message,
+        stdoutPreview: stdout.substring(Math.max(0, stdout.length - 1000)),
       });
     }
 

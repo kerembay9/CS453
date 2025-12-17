@@ -5,8 +5,6 @@ const passport = require("passport");
 const GitHubStrategy = require("passport-github2").Strategy;
 require("dotenv").config();
 
-const { ScreenContinueConnection } = require("./helpers/screenContinue");
-const { CONTINUE_CONFIG_PATH } = require("./helpers/config");
 
 const app = express();
 const authRoutes = require("./routes/auth");
@@ -76,9 +74,6 @@ app.use("/api", projectRoutes);
 
 app.listen(3001, () => {
   console.log("Backend running on port 3001");
-  console.log(
-    "Screen session 'opsidian-continue' will be created per-project when executing todos"
-  );
   // log the environment variables
   console.log("Environment variables:", process.env);
 });

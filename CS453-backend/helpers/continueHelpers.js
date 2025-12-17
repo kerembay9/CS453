@@ -163,15 +163,18 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       "continue"
     );
 
+    // Build absolute path to config file (in the continue directory)
+    const configFilePath = path.join(continueCliPath, "config.yaml");
+
     // Build the command as a shell string
     // Strategy: Pass prompt via stdin to avoid shell escaping issues
     // The CLI supports reading from stdin, which is much safer for long prompts with special characters
     const escapedCliPath = continueCliPath
       .replace(/"/g, '\\"')
       .replace(/\$/g, "\\$");
-    const escapedConfigPath = CONTINUE_CONFIG_PATH
-      ? CONTINUE_CONFIG_PATH.replace(/"/g, '\\"').replace(/\$/g, "\\$")
-      : "";
+    const escapedConfigPath = configFilePath
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, "\\$");
 
     // Build shell command
     // Strategy: Change to project directory, then run npm start from CLI directory
@@ -180,10 +183,14 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       .replace(/"/g, '\\"')
       .replace(/\$/g, "\\$");
 
-    // Change to project directory, then run npm start from CLI directory
-    // The config is already specified in package.json, so we don't need to pass it again
-    // The prompt will be passed via stdin
-    let command = `cd "${escapedProjectPath}" && npm --prefix "${escapedCliPath}" start`;
+    // Change to project directory, then run node directly with absolute paths
+    // This ensures the config path is always absolute and works regardless of working directory
+    // We use node directly instead of npm start to have full control over the config path
+    const escapedIndexPath = path.join(continueCliPath, "index.js")
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, "\\$");
+    
+    let command = `cd "${escapedProjectPath}" && node "${escapedIndexPath}" --config "${escapedConfigPath}"`;
 
     // Spawn shell process
     // The subshell will change to project directory, and the CLI script will run there
