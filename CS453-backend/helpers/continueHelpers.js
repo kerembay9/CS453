@@ -156,14 +156,11 @@ function detectQuotaError(errorOutput) {
 async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
   return new Promise((resolve, reject) => {
     // Path to the Continue CLI
-    // From CS453-backend/helpers to continue/extensions/cli
+    // From CS453-backend/helpers to CS453-backend/continue
     const continueCliPath = path.join(
       __dirname,
       "..",
-      "..",
-      "continue",
-      "extensions",
-      "cli"
+      "continue"
     );
 
     // Build the command as a shell string
@@ -177,42 +174,16 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       : "";
 
     // Build shell command
-    // Strategy: Change to project directory, then run npm from CLI directory
+    // Strategy: Change to project directory, then run npm start from CLI directory
     // The CLI uses process.cwd() which will be where Node.js process runs from
-    // When we cd to project dir and run npm, npm will change to CLI dir to run the script
-    // So we need to ensure the CLI script itself runs in project dir
-    // Solution: Use npm run dev but ensure we're in project dir when Node.js starts
     const escapedProjectPath = projectPath
       .replace(/"/g, '\\"')
       .replace(/\$/g, "\\$");
 
-    // Change to project directory, then run npm from CLI directory
-    // The key is that npm will run the script, but we need the script to run in project dir
-    // npm --prefix runs the script from the prefix dir, so process.cwd() will be CLI dir
-    // We need to change directory in the command so the CLI runs in project dir
-    // Actually, the best approach is to cd to project dir, then use npm run dev
-    // but we need npm to find package.json in CLI dir, so we use --prefix
-    // But then the script runs from CLI dir...
-    // Solution: Use a wrapper that changes to project dir before running the CLI script
-    // Or use npm run dev and change directory in the script itself
-    // Actually, simplest: cd to project dir, run npm from CLI dir, but the CLI will use process.cwd()
-    // which will be project dir because we cd'd there before running npm
-    // Wait, npm --prefix changes to prefix dir to run the script, so process.cwd() will be CLI dir
-
-    // Best solution: Use npm run dev, but run it from project directory
-    // The CLI script will run from CLI directory, but we can change directory in the CLI
-    // Or we can use a different approach: run the CLI script directly with node/tsx from project dir
-    // But that requires resolving dependencies from CLI dir
-
-    // Actually, the simplest: Use npm run dev from CLI dir, but set NODE_PATH or change dir
-    // Or use npm run dev with a wrapper script that changes directory
-
-    // Let's try: cd to project dir, then run npm from CLI dir
-    // npm will change to CLI dir to run script, but we can ensure PWD is project dir
-    let command = `cd "${escapedProjectPath}" && npm --prefix "${escapedCliPath}" run dev -- --auto`;
-    if (escapedConfigPath) {
-      command += ` --config "${escapedConfigPath}"`;
-    }
+    // Change to project directory, then run npm start from CLI directory
+    // The config is already specified in package.json, so we don't need to pass it again
+    // The prompt will be passed via stdin
+    let command = `cd "${escapedProjectPath}" && npm --prefix "${escapedCliPath}" start`;
 
     // Spawn shell process
     // The subshell will change to project directory, and the CLI script will run there

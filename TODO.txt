@@ -1,2 +1,1 @@
-1. pack everything into the desktop app including n8n
 2. add slack support for updating the user for new upload and done tasks

@@ -103,6 +103,7 @@ Return only a JSON array of todos.`;
       }
 
       // Send prompt and wait for response
+      console.log("hata burada herhal")
       const result = await connection.sendMessageAndWait(prompt, timeout);
       stdout = result.stdout || "";
 

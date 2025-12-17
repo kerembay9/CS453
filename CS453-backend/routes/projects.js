@@ -11,9 +11,13 @@ const NodeFormData = require("form-data");
 const { dbHelpers } = require("../db");
 
 // Import helpers
-const { PROJECTS_DIR, UPLOADS_DIR, N8N_WEBHOOK_URL, N8N_WEBHOOK_SECRET } = require("../helpers/config");
+const {
+  PROJECTS_DIR,
+  UPLOADS_DIR,
+  ELEVENLABS_API_KEY,
+  ELEVENLABS_TRANSCRIPTION_MODEL,
+} = require("../helpers/config");
 const { sanitizeName, moveFile, ensureDirs } = require("../helpers/utils");
-const { webhookSignatureMiddleware } = require("../helpers/webhookVerification");
 
 // Import sub-routes
 const todoRoutes = require("./todo");
@@ -264,7 +268,7 @@ router.delete("/", express.json(), async (req, res) => {
 });
 
 // -----------------------------
-// Upload audio → forward to n8n
+// Upload audio → transcribe with ElevenLabs API directly
 // If mounted at app.use("/api", router), path is /api/upload-audio
 // -----------------------------
 router.post("/upload-audio", async (req, res, next) => {
@@ -337,69 +341,59 @@ router.post("/upload-audio", async (req, res, next) => {
       finalPath
     );
 
-    // Use axios instead of fetch for better FormData support
-    const form = new NodeFormData();
-    form.append("audio", fs.createReadStream(finalPath), {
-      filename: sanitizedFilename,
-      contentType: "audio/mpeg", // change if not mp3
-    });
-    form.append("projectName", projectName);
-    form.append("audioFileId", audioFileId.toString()); // Include ID for webhook callback
-
-    console.log("FormData created with:", {
-      audioFile: sanitizedFilename,
-      projectName: projectName,
-      audioFileId: audioFileId,
-      contentType: "audio/mpeg",
-    });
-
-    // Use configurable webhook URL
-    if (!N8N_WEBHOOK_URL) {
+    if (!ELEVENLABS_API_KEY) {
       await dbHelpers.updateTranscription(audioFileId, null, "failed");
       return res.status(500).json({
-        error: "N8N webhook URL not configured",
-        message: "Please set N8N_WEBHOOK_URL environment variable",
+        error: "ELEVENLABS_API_KEY not configured",
+        message: "Please set ELEVENLABS_API_KEY environment variable",
       });
     }
 
-    const webhookResponse = await axios.post(
-      N8N_WEBHOOK_URL,
+    // Build form-data for ElevenLabs speech-to-text API
+    const form = new NodeFormData();
+    form.append(
+      "file",
+      fs.createReadStream(finalPath),
+      {
+        filename: sanitizedFilename,
+      }
+    );
+    form.append("model_id", ELEVENLABS_TRANSCRIPTION_MODEL || "scribe_v1");
+
+    console.log("Sending audio to ElevenLabs:", {
+      audioFile: sanitizedFilename,
+      projectName: projectName,
+      audioFileId: audioFileId,
+      model: ELEVENLABS_TRANSCRIPTION_MODEL || "scribe_v1",
+    });
+
+    const elevenResponse = await axios.post(
+      "https://api.elevenlabs.io/v1/speech-to-text",
       form,
       {
         headers: {
           ...form.getHeaders(),
+          "xi-api-key": ELEVENLABS_API_KEY,
         },
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
       }
     );
 
-    const webhookData = webhookResponse.data;
-    console.log("Webhook response:", webhookData);
+    const elevenData = elevenResponse.data;
+    console.log("ElevenLabs response:", elevenData);
 
-    if (webhookResponse.status < 200 || webhookResponse.status >= 300) {
-      // Update status to failed if webhook fails
-      await dbHelpers.updateTranscription(audioFileId, null, "failed");
-      return res.status(webhookResponse.status).json({
-        error: "Webhook request failed",
-        status: webhookResponse.status,
-        statusText: webhookResponse.statusText,
-        webhookResponse: webhookData,
-      });
-    }
-
-    // Check if webhook returned transcription result immediately
     let transcriptionText = null;
     let finalStatus = "processing";
 
-    if (typeof webhookData === "string" && webhookData.trim()) {
-      // If webhook returns a string, treat it as transcription
-      transcriptionText = webhookData.trim();
+    if (typeof elevenData === "string" && elevenData.trim()) {
+      transcriptionText = elevenData.trim();
       finalStatus = "completed";
-    } else if (webhookData && typeof webhookData === "object") {
-      // If webhook returns an object, look for transcription field
+    } else if (elevenData && typeof elevenData === "object") {
       transcriptionText =
-        webhookData.transcription || webhookData.text || webhookData.result;
+        elevenData.text ||
+        elevenData.transcription ||
+        elevenData.result;
       if (transcriptionText) {
         finalStatus = "completed";
       }
@@ -413,93 +407,38 @@ router.post("/upload-audio", async (req, res, next) => {
         finalStatus
       );
       console.log(
-        `Transcription completed immediately for audio file ${audioFileId}:`,
+        `Transcription completed for audio file ${audioFileId}:`,
         {
           status: finalStatus,
           hasTranscription: !!transcriptionText,
         }
       );
+    } else {
+      await dbHelpers.updateTranscription(audioFileId, null, "failed");
+      finalStatus = "failed";
     }
 
     return res.json({
-      success: true,
+      success: finalStatus === "completed",
       message: transcriptionText
         ? "Audio uploaded and transcription completed"
-        : "Audio uploaded and processing started",
+        : "Audio uploaded but transcription failed",
       audioFileId: audioFileId,
       transcription: transcriptionText,
       status: finalStatus,
-      webhookResponse: webhookData,
+      providerResponse: elevenData,
     });
   } catch (err) {
-    console.error("Upload/forward error:", err?.response?.data || err);
+    console.error("Upload/transcription error:", err?.response?.data || err);
     const status = err?.response?.status || 502;
     const details = err?.response?.data || String(err);
     return res.status(status).json({
-      error: "Failed to forward audio to n8n",
+      error: "Failed to transcribe audio via ElevenLabs",
       status,
       details,
     });
   }
 });
-
-// -----------------------------
-// N8N Webhook Callback for Transcription Results
-// -----------------------------
-// Use raw body parser for signature verification, then parse JSON manually
-router.post(
-  "/webhook/transcription-complete",
-  express.raw({ type: "application/json" }),
-  webhookSignatureMiddleware(N8N_WEBHOOK_SECRET),
-  async (req, res) => {
-    try {
-      // Parse JSON from raw body after signature verification
-      let body;
-      try {
-        body = JSON.parse(req.body.toString());
-      } catch (parseError) {
-        return res.status(400).json({ error: "Invalid JSON in request body" });
-      }
-
-      const { audioFileId, transcriptionText, status, error } = body;
-
-      if (!audioFileId) {
-        return res.status(400).json({ error: "Missing audioFileId" });
-      }
-
-      // Update the database record with transcription results
-      const finalStatus =
-        status || (transcriptionText ? "completed" : "failed");
-      const finalTranscription =
-        transcriptionText || (error ? `Error: ${error}` : null);
-
-      const changes = await dbHelpers.updateTranscription(
-        audioFileId,
-        finalTranscription,
-        finalStatus
-      );
-
-      if (changes === 0) {
-        return res.status(404).json({ error: "Audio file not found" });
-      }
-
-      console.log(`Transcription completed for audio file ${audioFileId}:`, {
-        status: finalStatus,
-        hasTranscription: !!finalTranscription,
-      });
-
-      res.json({
-        success: true,
-        message: "Transcription result updated",
-        audioFileId,
-        status: finalStatus,
-      });
-    } catch (error) {
-      console.error("Webhook callback error:", error);
-      res.status(500).json({ error: "Failed to update transcription result" });
-    }
-  }
-);
 
 // -----------------------------
 // Audio Files Management Endpoints

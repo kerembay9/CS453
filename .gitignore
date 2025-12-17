@@ -94,3 +94,4 @@ coverage/
 .cache/
 .parcel-cache/
 .turbo/
+CS453-backend/continue/config.yaml
