@@ -50,6 +50,17 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Check if config.yaml exists
+router.get("/check-config", async (req, res) => {
+  try {
+    const exists = fs.existsSync(CONTINUE_CONFIG_PATH);
+    res.json({ exists });
+  } catch (error) {
+    console.error("Check config error:", error);
+    res.status(500).json({ error: "Failed to check config" });
+  }
+});
+
 // Get a single setting
 router.get("/:key", async (req, res) => {
   try {
@@ -93,55 +104,66 @@ router.put("/", async (req, res) => {
           activeProvider = activeProviderSetting?.value || "gemini";
         }
 
-        // Get API key for the active provider
-        let apiKey = "";
-        if (activeProvider === "openai") {
-          apiKey = settings.openai_api_key;
-          if (!apiKey) {
-            const openaiKeySetting = await dbHelpers.getSetting(
-              "openai_api_key"
-            );
-            apiKey = openaiKeySetting?.value || "";
-          }
+        // Handle ollama provider (no API key needed)
+        if (activeProvider === "ollama") {
+          // Ollama uses a different config format with 'uses' field
+          await updateConfigYaml(CONTINUE_CONFIG_PATH, {
+            provider: "ollama",
+            model: "gpt-oss-20b",
+            apiKey: "", // No API key needed for Ollama
+            name: "My Local Config",
+          });
         } else {
-          apiKey = settings.gemini_api_key;
-          if (!apiKey) {
-            const geminiKeySetting = await dbHelpers.getSetting(
-              "gemini_api_key"
-            );
-            apiKey = geminiKeySetting?.value || "";
+          // Get API key for the active provider
+          let apiKey = "";
+          if (activeProvider === "openai") {
+            apiKey = settings.openai_api_key;
             if (!apiKey) {
-              const continueKeySetting = await dbHelpers.getSetting(
-                "continue_api_key"
+              const openaiKeySetting = await dbHelpers.getSetting(
+                "openai_api_key"
               );
-              apiKey = continueKeySetting?.value || "";
+              apiKey = openaiKeySetting?.value || "";
+            }
+          } else {
+            apiKey = settings.gemini_api_key;
+            if (!apiKey) {
+              const geminiKeySetting = await dbHelpers.getSetting(
+                "gemini_api_key"
+              );
+              apiKey = geminiKeySetting?.value || "";
+              if (!apiKey) {
+                const continueKeySetting = await dbHelpers.getSetting(
+                  "continue_api_key"
+                );
+                apiKey = continueKeySetting?.value || "";
+              }
             }
           }
-        }
 
-        // Validate API key is present
-        if (!apiKey) {
-          console.warn(
-            "[SETTINGS] No API key found for provider:",
-            activeProvider
-          );
-        } else {
-          // Use safe YAML update with atomic writes
-          const model =
-            activeProvider === "openai"
-              ? "gpt-4.1-nano-2025-04-14"
-              : "gemini-2.0-flash-exp";
-          const modelName =
-            activeProvider === "openai"
-              ? "OpenAI GPT-4.1 nano"
-              : "Gemini-flash";
+          // Validate API key is present
+          if (!apiKey) {
+            console.warn(
+              "[SETTINGS] No API key found for provider:",
+              activeProvider
+            );
+          } else {
+            // Use safe YAML update with atomic writes
+            const model =
+              activeProvider === "openai"
+                ? "gpt-4.1-nano-2025-04-14"
+                : "gemini-2.0-flash-exp";
+            const modelName =
+              activeProvider === "openai"
+                ? "OpenAI GPT-4.1 nano"
+                : "Gemini-flash";
 
-          await updateConfigYaml(CONTINUE_CONFIG_PATH, {
-            provider: activeProvider,
-            model: model,
-            apiKey: apiKey,
-            name: modelName,
-          });
+            await updateConfigYaml(CONTINUE_CONFIG_PATH, {
+              provider: activeProvider,
+              model: model,
+              apiKey: apiKey,
+              name: modelName,
+            });
+          }
         }
       } catch (configError) {
         console.error("[SETTINGS] Error updating config.yaml:", configError);

@@ -23,13 +23,16 @@ try {
 async function updateConfigYaml(configPath, updates) {
   const { provider, model, apiKey, name } = updates;
 
-  // Validate inputs
-  if (!provider || !model || !apiKey) {
-    throw new Error("Missing required fields: provider, model, apiKey");
+  // Validate inputs (ollama doesn't need apiKey)
+  if (!provider || !model) {
+    throw new Error("Missing required fields: provider, model");
+  }
+  if (provider !== "ollama" && !apiKey) {
+    throw new Error("Missing required field: apiKey (required for openai and gemini)");
   }
 
-  if (!["openai", "gemini"].includes(provider)) {
-    throw new Error(`Invalid provider: ${provider}. Must be 'openai' or 'gemini'`);
+  if (!["openai", "gemini", "ollama"].includes(provider)) {
+    throw new Error(`Invalid provider: ${provider}. Must be 'openai', 'gemini', or 'ollama'`);
   }
 
   // Escape API key for YAML (handle special characters)
@@ -72,8 +75,8 @@ async function updateConfigYaml(configPath, updates) {
 
   if (yaml && configData) {
     // Update parsed YAML structure
-    configData.name = name || "Opsidian Configuration";
-    configData.version = configData.version || "1.0";
+    configData.name = name || (provider === "ollama" ? "My Local Config" : "Opsidian Configuration");
+    configData.version = configData.version || (provider === "ollama" ? "0.0.1" : "1.0");
     configData.schema = configData.schema || "v1";
 
     if (!configData.models || !Array.isArray(configData.models)) {
@@ -82,22 +85,36 @@ async function updateConfigYaml(configPath, updates) {
 
     // Update or create first model entry
     if (configData.models.length === 0) {
-      configData.models.push({
-        name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
-        provider: provider,
-        model: model,
-        apiKey: apiKey,
-        roles: ["chat", "autocomplete"],
-      });
+      if (provider === "ollama") {
+        // Ollama uses 'uses' field instead of provider/model/apiKey
+        configData.models.push({
+          uses: `ollama/${model}`,
+        });
+      } else {
+        configData.models.push({
+          name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
+          provider: provider,
+          model: model,
+          apiKey: apiKey,
+          roles: ["chat", "autocomplete"],
+        });
+      }
     } else {
       // Update first model
-      configData.models[0] = {
-        name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
-        provider: provider,
-        model: model,
-        apiKey: apiKey,
-        roles: configData.models[0].roles || ["chat", "autocomplete"],
-      };
+      if (provider === "ollama") {
+        // Ollama uses 'uses' field instead of provider/model/apiKey
+        configData.models[0] = {
+          uses: `ollama/${model}`,
+        };
+      } else {
+        configData.models[0] = {
+          name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
+          provider: provider,
+          model: model,
+          apiKey: apiKey,
+          roles: configData.models[0].roles || ["chat", "autocomplete"],
+        };
+      }
     }
 
     // Validate structure before stringifying
@@ -113,9 +130,19 @@ async function updateConfigYaml(configPath, updates) {
     }
   } else {
     // Fallback: Generate YAML manually (if js-yaml not available or parse failed)
-    const modelName =
-      name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash");
-    yamlContent = `name: "Opsidian Configuration"
+    if (provider === "ollama") {
+      // Ollama uses 'uses' field format
+      const configName = name || "My Local Config";
+      yamlContent = `name: ${configName}
+version: 0.0.1
+schema: v1
+models:
+  - uses: ollama/${model}
+`;
+    } else {
+      const modelName =
+        name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash");
+      yamlContent = `name: "Opsidian Configuration"
 version: "1.0"
 schema: v1
 models:
@@ -127,6 +154,7 @@ models:
       - chat
       - autocomplete
 `;
+    }
   }
 
   // Atomic write: write to temp file, then rename
