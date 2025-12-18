@@ -19,10 +19,11 @@ if (process.env.SESSION_SECRET !== undefined) {
       resave: false,
       saveUninitialized: false,
       cookie: {
-        secure: process.env.NODE_ENV === "production", // HTTPS only in production
+        secure: false, // Allow cookies over HTTP for localhost (needed for Electron)
         httpOnly: true, // Prevents XSS attacks
         maxAge: 24 * 60 * 60 * 1000, // 24 hours
-        sameSite: "lax", // CSRF protection
+        sameSite: "lax", // CSRF protection - "lax" allows cookies on top-level redirects
+        path: '/', // Ensure cookie is available for all paths
       },
     })
   );
