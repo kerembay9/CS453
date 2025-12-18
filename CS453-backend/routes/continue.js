@@ -29,12 +29,6 @@ router.post("/execute-todo/:todoId", async (req, res) => {
       return res.status(404).json({ error: "Todo not found" });
     }
 
-    if (!todo.code_snippet) {
-      return res
-        .status(400)
-        .json({ error: "No code snippet or command to execute" });
-    }
-
     projectName = todo.project_name;
     const projectPath = path.join(PROJECTS_DIR, projectName);
 
@@ -90,9 +84,14 @@ router.post("/execute-todo/:todoId", async (req, res) => {
       }
     }
 
+    // If no code snippet is provided, use a single space
+    const codeSnippet = (!todo.code_snippet || !todo.code_snippet.trim()) 
+      ? " " 
+      : todo.code_snippet.trim();
+
     // Execute the todo (code or command)
     const result = await executeCodeWithContinue(
-      todo.code_snippet.trim(),
+      codeSnippet,
       todo,
       projectPath
     );
@@ -103,7 +102,7 @@ router.post("/execute-todo/:todoId", async (req, res) => {
         executionHistoryId,
         todoId,
         1,
-        todo.code_snippet.trim(),
+        codeSnippet,
         result.error,
         result.stdout,
         result.stderr,
