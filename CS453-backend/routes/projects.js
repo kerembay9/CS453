@@ -97,11 +97,33 @@ function ensurePathWithinProjectsDir(projectName) {
 }
 
 // Safe git clone using spawn (no shell injection)
-function safeGitClone(repoUrl, targetPath) {
+// If accessToken is provided, inject it into HTTPS URLs for authentication
+function safeGitClone(repoUrl, targetPath, accessToken = null) {
   return new Promise((resolve, reject) => {
-    const gitProcess = spawn("git", ["clone", repoUrl, targetPath], {
+    // If we have an access token and it's an HTTPS URL, inject the token
+    let finalRepoUrl = repoUrl;
+    if (accessToken && repoUrl.startsWith('https://')) {
+      // Inject token into HTTPS URL: https://github.com/user/repo -> https://TOKEN@github.com/user/repo
+      try {
+        // Simple string replacement: insert token after https://
+        finalRepoUrl = repoUrl.replace('https://', `https://${accessToken}@`);
+        console.log('Using authenticated URL for clone');
+      } catch (urlError) {
+        console.warn('Failed to inject token into URL, trying without token:', urlError.message);
+        // Fall back to original URL if parsing fails
+      }
+    }
+
+    console.log(`Cloning repository: ${repoUrl} -> ${targetPath}${accessToken ? ' (with authentication)' : ''}`);
+
+    const gitProcess = spawn("git", ["clone", finalRepoUrl, targetPath], {
       cwd: PROJECTS_DIR,
       stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // Set GIT_TERMINAL_PROMPT=0 to prevent interactive prompts
+        GIT_TERMINAL_PROMPT: "0",
+      },
     });
 
     let stdout = "";
@@ -119,7 +141,12 @@ function safeGitClone(repoUrl, targetPath) {
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        reject(new Error(`git clone failed with code ${code}: ${stderr || stdout}`));
+        // Don't expose the token in error messages
+        const errorMessage = stderr || stdout;
+        const sanitizedError = accessToken 
+          ? errorMessage.replace(new RegExp(accessToken, 'g'), '[REDACTED]')
+          : errorMessage;
+        reject(new Error(`git clone failed with code ${code}: ${sanitizedError}`));
       }
     });
 
@@ -181,6 +208,12 @@ router.post("/clone-repo", express.json(), async (req, res) => {
       });
     }
 
+    // Get access token from authenticated user (if available)
+    const accessToken = req.user?.accessToken || null;
+    if (!accessToken) {
+      console.warn("No access token available - cloning may fail for private repositories");
+    }
+
     // Sanitize and validate project name, ensure path safety
     let sanitized, repoPath;
     try {
@@ -198,8 +231,8 @@ router.post("/clone-repo", express.json(), async (req, res) => {
       return res.status(400).json({ error: "Repository already exists" });
     }
 
-    // Use safe git clone (no shell injection)
-    await safeGitClone(repoUrl.trim(), repoPath);
+    // Use safe git clone with authentication (no shell injection)
+    await safeGitClone(repoUrl.trim(), repoPath, accessToken);
     
     res.json({ 
       success: true, 
@@ -208,8 +241,19 @@ router.post("/clone-repo", express.json(), async (req, res) => {
     });
   } catch (error) {
     console.error("clone-repo error:", error);
+    
+    // Provide more helpful error messages
+    let errorMessage = "Failed to clone repository";
+    if (error.message.includes("Authentication failed") || error.message.includes("Permission denied")) {
+      errorMessage = "Authentication failed. Please ensure you have access to this repository.";
+    } else if (error.message.includes("Repository not found")) {
+      errorMessage = "Repository not found. Please check the repository URL.";
+    } else if (error.message.includes("already exists")) {
+      errorMessage = "Repository already exists locally.";
+    }
+    
     res.status(500).json({ 
-      error: "Failed to clone repository",
+      error: errorMessage,
       details: error.message 
     });
   }
