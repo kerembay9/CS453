@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, session } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -235,11 +235,16 @@ function startFrontend() {
         );
 
     // Next.js standalone includes the project folder name in the path
-    // Try the nested path first (production), then fall back to direct path (dev)
+    // Try the nested path first, then fall back to direct path
     let serverPath = path.join(frontendPath, "CS453-frontend", "server.js");
-    if (!fs.existsSync(serverPath) && isDev) {
-      // Fall back to direct path for development
+    const nestedPathExists = fs.existsSync(serverPath);
+    
+    if (!nestedPathExists) {
+      // Fall back to direct path if nested path doesn't exist
       serverPath = path.join(frontendPath, "server.js");
+      console.log("Nested path not found, trying direct path:", serverPath);
+    } else {
+      console.log("Using nested path:", serverPath);
     }
 
     // Check if paths exist
@@ -249,6 +254,9 @@ function startFrontend() {
       );
       console.error(error.message);
       console.error("Frontend path:", frontendPath);
+      console.error("Tried nested path:", path.join(frontendPath, "CS453-frontend", "server.js"));
+      console.error("Tried direct path:", path.join(frontendPath, "server.js"));
+      console.error("Contents of frontendPath:", fs.existsSync(frontendPath) ? fs.readdirSync(frontendPath) : "DOES NOT EXIST");
       reject(error);
       return;
     }
@@ -341,6 +349,16 @@ function createWindow() {
     ? path.join(__dirname, "..", "opsidian-desktop-logo.png")
     : path.join(process.resourcesPath, "..", "opsidian-desktop-logo.png");
 
+  // Configure session to ensure cookies persist across redirects
+  const ses = session.defaultSession;
+  
+  // Enable persistent cookies
+  ses.cookies.on('changed', (event, cookie, cause, removed) => {
+    if (!removed) {
+      console.log('Cookie set:', cookie.name, 'for', cookie.domain);
+    }
+  });
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -350,6 +368,7 @@ function createWindow() {
       webSecurity: true,
       allowRunningInsecureContent: false,
       webviewTag: true, // Allow webview tags for iframes
+      partition: 'persist:main', // Use persistent partition for cookies
     },
     icon: iconPath,
     title: "Opsidian",
@@ -357,48 +376,70 @@ function createWindow() {
 
   // Allow navigation and redirects
   mainWindow.webContents.on("will-navigate", (event, navigationUrl) => {
-    // Allow navigation to localhost (our frontend server)
-    const parsedUrl = new URL(navigationUrl);
-    if (
-      parsedUrl.hostname === "localhost" ||
-      parsedUrl.hostname === "127.0.0.1"
-    ) {
-      // Allow navigation within localhost
-      return;
+    console.log("Navigation detected to:", navigationUrl);
+    try {
+      const parsedUrl = new URL(navigationUrl);
+      
+      // Allow navigation to localhost (our frontend server and OAuth callback)
+      if (
+        parsedUrl.hostname === "localhost" ||
+        parsedUrl.hostname === "127.0.0.1"
+      ) {
+        console.log("Allowing navigation to localhost");
+        return; // Allow navigation
+      }
+      
+      // Allow GitHub OAuth flow
+      if (
+        parsedUrl.hostname === "github.com" ||
+        parsedUrl.hostname.endsWith(".github.com")
+      ) {
+        console.log("Allowing navigation to GitHub");
+        return; // Allow navigation
+      }
+      
+      // Block navigation to other external URLs
+      console.log("Blocking navigation to:", navigationUrl);
+      event.preventDefault();
+    } catch (error) {
+      // If URL parsing fails, allow it (might be a relative URL or special case)
+      console.log("URL parsing failed, allowing navigation:", navigationUrl);
+      return; // Allow navigation if we can't parse it
     }
-    // Allow GitHub OAuth flow
-    if (
-      parsedUrl.hostname === "github.com" ||
-      parsedUrl.hostname.endsWith(".github.com")
-    ) {
-      // Allow navigation to GitHub for OAuth
-      return;
-    }
-    // Block navigation to other external URLs
-    event.preventDefault();
   });
 
-  // Allow redirects
+  // Allow redirects (especially important for OAuth callback)
   mainWindow.webContents.on("will-redirect", (event, navigationUrl) => {
-    // Allow redirects to localhost 
-    const parsedUrl = new URL(navigationUrl);
-    if (
-      parsedUrl.hostname === "localhost" ||
-      parsedUrl.hostname === "127.0.0.1"
-    ) {
-      // Allow redirect within localhost
-      return;
+    console.log("Redirect detected to:", navigationUrl);
+    try {
+      const parsedUrl = new URL(navigationUrl);
+      
+      // Always allow redirects to localhost (including OAuth callback)
+      if (
+        parsedUrl.hostname === "localhost" ||
+        parsedUrl.hostname === "127.0.0.1"
+      ) {
+        console.log("Allowing redirect to localhost");
+        return; // Allow redirect
+      }
+      
+      // Allow GitHub OAuth redirects
+      if (
+        parsedUrl.hostname === "github.com" ||
+        parsedUrl.hostname.endsWith(".github.com")
+      ) {
+        console.log("Allowing redirect to GitHub");
+        return; // Allow redirect
+      }
+      
+      // Block redirects to other external URLs
+      console.log("Blocking redirect to:", navigationUrl);
+      event.preventDefault();
+    } catch (error) {
+      // If URL parsing fails, allow it (might be a relative URL or special case)
+      console.log("URL parsing failed, allowing redirect:", navigationUrl);
+      return; // Allow redirect if we can't parse it
     }
-    // Allow GitHub OAuth redirects
-    if (
-      parsedUrl.hostname === "github.com" ||
-      parsedUrl.hostname.endsWith(".github.com")
-    ) {
-      // Allow redirect to GitHub for OAuth
-      return;
-    }
-    // Block redirects to other external URLs
-    event.preventDefault();
   });
 
   // Load the frontend
