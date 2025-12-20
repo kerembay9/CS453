@@ -92,7 +92,7 @@ async function updateConfigYaml(configPath, updates) {
         });
       } else {
         configData.models.push({
-          name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
+          name: name || (provider === "openai" ? "OpenAI GPT-5 nano" : "Gemini-flash"),
           provider: provider,
           model: model,
           apiKey: apiKey,
@@ -108,7 +108,7 @@ async function updateConfigYaml(configPath, updates) {
         };
       } else {
         configData.models[0] = {
-          name: name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash"),
+          name: name || (provider === "openai" ? "OpenAI GPT-5 nano" : "Gemini-flash"),
           provider: provider,
           model: model,
           apiKey: apiKey,
@@ -141,7 +141,7 @@ models:
 `;
     } else {
       const modelName =
-        name || (provider === "openai" ? "OpenAI GPT-4.1 nano" : "Gemini-flash");
+        name || (provider === "openai" ? "OpenAI GPT-5 nano" : "Gemini-flash");
       yamlContent = `name: "Opsidian Configuration"
 version: "1.0"
 schema: v1

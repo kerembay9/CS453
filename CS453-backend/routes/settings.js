@@ -150,11 +150,11 @@ router.put("/", async (req, res) => {
             // Use safe YAML update with atomic writes
             const model =
               activeProvider === "openai"
-                ? "gpt-4.1-nano-2025-04-14"
-                : "gemini-2.0-flash-exp";
+                ? "gpt-5-nano"
+                : "gemini-2.5-flash-lite";
             const modelName =
               activeProvider === "openai"
-                ? "OpenAI GPT-4.1 nano"
+                ? "OpenAI GPT-5 nano"
                 : "Gemini-flash";
 
             await updateConfigYaml(CONTINUE_CONFIG_PATH, {

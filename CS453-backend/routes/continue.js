@@ -6,7 +6,7 @@ const { promisify } = require("util");
 const fsp = require("fs/promises");
 const { dbHelpers } = require("../db");
 const { PROJECTS_DIR } = require("../helpers/config");
-const { createGitCheckpoint } = require("../helpers/gitHelpers");
+const { createGitCheckpoint, getGitDiff } = require("../helpers/gitHelpers");
 const {
   detectQuotaError,
   executeCodeWithContinue,
@@ -51,11 +51,19 @@ router.post("/execute-todo/:todoId", async (req, res) => {
     }
     lockAcquired = true;
 
-    // Create git checkpoint before execution
+    // Smart git checkpoint strategy:
+    // 1. Always create checkpoint before execution (for revert capability)
+    // 2. Get diff from this execution's checkpoint to show only this execution's changes
+    // 3. Each execution has its own checkpoint, so diffs don't mix
     let gitCommitHash = null;
     let executionHistoryId = null;
+    
     try {
+      // Always create checkpoint before execution (for revert capability)
+      // Each execution gets its own checkpoint, preventing confusion
+      console.log(`[EXECUTE-TODO] Creating checkpoint before execution...`);
       gitCommitHash = await createGitCheckpoint(projectPath);
+      
       if (gitCommitHash) {
         // Store execution history
         executionHistoryId = await dbHelpers.insertExecutionHistory(
@@ -72,6 +80,7 @@ router.post("/execute-todo/:todoId", async (req, res) => {
         );
       }
     } catch (checkpointError) {
+      console.error(`[EXECUTE-TODO] Checkpoint error:`, checkpointError);
       // Still create execution history entry
       try {
         executionHistoryId = await dbHelpers.insertExecutionHistory(
@@ -113,11 +122,63 @@ router.post("/execute-todo/:todoId", async (req, res) => {
     }
 
     if (result.success) {
-      // Update todo status to completed on successful execution
-      try {
-        await dbHelpers.updateTodo(todoId, { status: "completed" });
-      } catch (statusError) {
-        // Ignore
+      // Get git diff to show what changed in this execution
+      // Always diff from this execution's checkpoint to show only this execution's changes
+      // This prevents confusion when multiple todos are executed
+      let codeDiff = null;
+      
+      console.log(`[EXECUTE-TODO] Attempting to get diff. gitCommitHash: ${gitCommitHash}`);
+      
+      if (gitCommitHash) {
+        try {
+          codeDiff = await getGitDiff(projectPath, gitCommitHash);
+          console.log(`[EXECUTE-TODO] Git diff retrieved from checkpoint ${gitCommitHash}: ${codeDiff ? codeDiff.length + " chars" : "no changes"}`);
+          if (codeDiff) {
+            console.log(`[EXECUTE-TODO] Diff preview (first 500 chars): ${codeDiff.substring(0, 500)}`);
+          }
+        } catch (diffError) {
+          console.error(`[EXECUTE-TODO] Failed to get git diff:`, diffError.message);
+          console.error(`[EXECUTE-TODO] Diff error stack:`, diffError.stack);
+        }
+      } else {
+        console.log(`[EXECUTE-TODO] No gitCommitHash, trying unstaged changes...`);
+        // Try to get unstaged changes as fallback
+        try {
+          codeDiff = await getGitDiff(projectPath, null);
+          console.log(`[EXECUTE-TODO] Unstaged diff retrieved: ${codeDiff ? codeDiff.length + " chars" : "no changes"}`);
+        } catch (fallbackError) {
+          console.error(`[EXECUTE-TODO] Failed to get unstaged diff:`, fallbackError.message);
+        }
+      }
+
+      // Always update todo with diff if available (even if code_snippet exists)
+      // This shows the actual changes made by execution
+      if (codeDiff && codeDiff.trim().length > 0) {
+        try {
+          // Store diff in code_snippet field (will be displayed as diff in frontend)
+          await dbHelpers.updateTodo(todoId, { 
+            code_snippet: codeDiff,
+            status: "completed" 
+          });
+          console.log(`[EXECUTE-TODO] ✅ Updated todo ${todoId} with code diff (${codeDiff.length} chars)`);
+        } catch (updateError) {
+          console.error(`[EXECUTE-TODO] Failed to update todo with diff:`, updateError.message);
+          console.error(`[EXECUTE-TODO] Update error stack:`, updateError.stack);
+          // Fallback: just update status
+          try {
+            await dbHelpers.updateTodo(todoId, { status: "completed" });
+          } catch (statusError) {
+            // Ignore
+          }
+        }
+      } else {
+        console.log(`[EXECUTE-TODO] ⚠️ No diff available (codeDiff: ${codeDiff ? "empty" : "null"}), just updating status`);
+        // No diff available, just update status
+        try {
+          await dbHelpers.updateTodo(todoId, { status: "completed" });
+        } catch (statusError) {
+          // Ignore
+        }
       }
 
       return res.json({
@@ -127,6 +188,7 @@ router.post("/execute-todo/:todoId", async (req, res) => {
         filePath: result.filePath || null,
         checkpointCreated: !!gitCommitHash,
         gitCommitHash: gitCommitHash,
+        codeDiff: codeDiff, // Include diff in response
       });
     } else {
       // Handle quota errors

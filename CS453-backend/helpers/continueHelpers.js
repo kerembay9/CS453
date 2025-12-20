@@ -2,6 +2,7 @@ const { exec, spawn } = require("child_process");
 const { promisify } = require("util");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { CONTINUE_CONFIG_PATH } = require("./config");
 const { dbHelpers } = require("../db");
 
@@ -188,19 +189,67 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     // We use node directly instead of npm start to have full control over the config path
     const indexPath = path.join(continueCliPath, "index.js");
     
-    // Build command arguments - pass prompt as command-line argument to avoid stdin timing issues
-    // Use spawn with array of arguments to avoid shell escaping issues
+    // Build command arguments
+    // Strategy: For very long prompts, write to temp file and reference it
+    // For shorter prompts, use positional argument
+    // IMPORTANT: Use --print flag for non-interactive output
     const nodeArgs = [
       indexPath,
       "--config",
       configFilePath,
       "--auto", // Enable auto mode to allow all file modifications without permission prompts
+      "--print", // Print response and exit (non-interactive mode) - REQUIRED for getting output
+      "--silent", // Strip tags and excess whitespace from output
     ];
     
-    // Add prompt as argument if provided
-    // The CLI expects the prompt as the first positional argument
+    let promptFile = null;
+    let cleanupPromptFile = null;
+    
+    // If prompt is very long (>10000 chars), use temp file to avoid command-line limits
     if (prompt && prompt.trim()) {
-      nodeArgs.push(prompt);
+      if (prompt.length > 10000) {
+        // Write prompt to temp file
+        try {
+          promptFile = path.join(os.tmpdir(), `continue-prompt-${Date.now()}-${Math.random().toString(36).substring(7)}.txt`);
+          fs.writeFileSync(promptFile, prompt, 'utf8');
+          console.log(`[CLI] Prompt written to temp file: ${promptFile} (${prompt.length} chars)`);
+          
+          // Add file path as argument (Continue CLI might read from file)
+          // Or add prompt content directly if CLI doesn't support file input
+          nodeArgs.push(prompt);
+          
+          // Cleanup function
+          cleanupPromptFile = () => {
+            try {
+              if (fs.existsSync(promptFile)) {
+                fs.unlinkSync(promptFile);
+                console.log(`[CLI] Cleaned up temp prompt file: ${promptFile}`);
+              }
+            } catch (err) {
+              console.warn(`[CLI] Failed to cleanup temp file: ${err.message}`);
+            }
+          };
+        } catch (err) {
+          console.error(`[CLI] Failed to write prompt to temp file:`, err);
+          // Fallback to positional argument
+          nodeArgs.push(prompt);
+        }
+      } else {
+        // Short prompt, use positional argument directly
+        console.log(`[CLI] Adding prompt as positional argument (${prompt.length} chars)`);
+        nodeArgs.push(prompt);
+      }
+      
+      console.log(`[CLI] Prompt details:`, {
+        promptLength: prompt.length,
+        promptPreview: prompt.substring(0, 300),
+        transcriptionInPrompt: prompt.includes("TRANSCRIPTION:") || false,
+        transcriptionStartIndex: prompt.indexOf("TRANSCRIPTION:"),
+        hasTranscriptionContent: prompt.indexOf("TRANSCRIPTION:") !== -1 && 
+                                 prompt.indexOf("CODEBASE CONTEXT:") !== -1 &&
+                                 prompt.substring(prompt.indexOf("TRANSCRIPTION:") + "TRANSCRIPTION:".length, 
+                                                 prompt.indexOf("CODEBASE CONTEXT:")).trim().length > 0
+      });
     }
 
     // Spawn process directly with node, avoiding shell command string
@@ -222,6 +271,8 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     let stdout = "";
     let stderr = "";
     let timeoutId = null;
+    let processCompleted = false; // Track if process actually completed
+    let timeoutOccurred = false; // Track if timeout occurred
 
     // Log command details for debugging
     const commandStr = `node ${nodeArgs.join(" ")}`;
@@ -231,13 +282,24 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     console.log(`[CLI] Project path: ${projectPath}`);
     console.log(`[CLI] Config path: ${configFilePath}`);
     console.log(`[CLI] Prompt length: ${prompt ? prompt.length : 0}`);
+    console.log(`[CLI] Command argument count: ${nodeArgs.length}`);
+    console.log(`[CLI] Last argument (prompt) length: ${nodeArgs[nodeArgs.length - 1]?.length || 0}`);
+    console.log(`[CLI] Full command (first 500 chars): ${commandStr.substring(0, 500)}`);
     if (prompt) {
       console.log(`[CLI] Full prompt:\n${prompt}`);
+      // Debug: Verify transcription is in the prompt
+      const transcriptionSection = prompt.substring(
+        prompt.indexOf("TRANSCRIPTION:") + "TRANSCRIPTION:".length,
+        prompt.indexOf("CODEBASE CONTEXT:")
+      );
+      console.log(`[CLI] Transcription section length: ${transcriptionSection.trim().length}`);
+      console.log(`[CLI] Transcription section preview: ${transcriptionSection.trim().substring(0, 200)}`);
     } else {
       console.log(`[CLI] No prompt provided`);
     }
 
-    // Close stdin immediately since we're passing prompt as argument
+    // Close stdin - prompt is sent as positional argument
+    // Continue CLI likely reads prompt from command-line argument, not stdin
     shellProcess.stdin.end();
 
     // Collect stdout with real-time logging for debugging
@@ -258,15 +320,36 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
 
     // Handle process exit
     shellProcess.on("exit", (code, signal) => {
+      processCompleted = true;
       console.log(`[CLI] Process exited with code: ${code}, signal: ${signal}`);
       console.log(
         `[CLI] stdout length: ${stdout.length}, stderr length: ${stderr.length}`
       );
       console.log(`[CLI] stdout preview: ${stdout.substring(0, 200)}`);
       console.log(`[CLI] stderr preview: ${stderr.substring(0, 200)}`);
+      console.log(`[CLI] Timeout occurred: ${timeoutOccurred}`);
 
       if (timeoutId) {
         clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      // Cleanup temp file if used
+      if (cleanupPromptFile) {
+        cleanupPromptFile();
+      }
+      
+      // If timeout occurred before exit, reject with timeout error
+      if (timeoutOccurred) {
+        console.warn(`[CLI] Process exited after timeout occurred - execution may be incomplete`);
+        return reject({
+          code: "TIMEOUT",
+          message: `Execution timed out after ${timeout}ms (${Math.floor(timeout / 1000)}s). Process exited with code ${code} but execution may be incomplete.`,
+          stdout: stdout,
+          stderr: stderr,
+          exitCode: code,
+          signal: signal,
+        });
       }
 
       // code is null when process was killed by a signal
@@ -339,6 +422,93 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       }
 
       if (code === 0) {
+        // Even with exit code 0, check if execution actually completed
+        // Continue CLI might exit with 0 even if interrupted or incomplete
+        const allOutput = (stdout || "") + (stderr || "");
+        const trimmedOutput = allOutput.trim();
+        
+        console.log(`[CLI] Checking execution completion (output length: ${trimmedOutput.length})`);
+        
+        // Check for indicators that execution was incomplete or failed
+        const incompleteIndicators = [
+          /execution.*incomplete/i,
+          /task.*not.*completed/i,
+          /interrupted/i,
+          /cancelled/i,
+          /timeout/i,
+          /killed/i,
+          /terminated/i,
+          /aborted/i,
+        ];
+        
+        const hasIncompleteIndicator = incompleteIndicators.some(pattern => 
+          pattern.test(allOutput)
+        );
+        
+        // Check if output is suspiciously empty or too short (might indicate early exit)
+        // For execution tasks, we expect some output (at least confirmation or result)
+        const outputTooShort = trimmedOutput.length < 10;
+        
+        // Check for error patterns even with exit code 0
+        const errorPatterns = [
+          /error.*executing/i,
+          /failed.*to.*execute/i,
+          /execution.*failed/i,
+          /could.*not.*complete/i,
+          /unable.*to.*complete/i,
+        ];
+        
+        const hasErrorPattern = errorPatterns.some(pattern => 
+          pattern.test(allOutput)
+        );
+        
+        // Check for success indicators (positive signal that execution completed)
+        const successIndicators = [
+          /completed/i,
+          /finished/i,
+          /done/i,
+          /success/i,
+          /executed/i,
+        ];
+        
+        const hasSuccessIndicator = successIndicators.some(pattern => 
+          pattern.test(allOutput)
+        );
+        
+        // If we have timeout flag set, be more strict about success
+        if (timeoutOccurred) {
+          console.warn(`[CLI] ⚠️ Timeout occurred before exit - execution may be incomplete`);
+          return reject({
+            code: "TIMEOUT",
+            message: `Execution timed out but process exited with code 0. Execution may be incomplete.`,
+            stdout: stdout,
+            stderr: stderr,
+          });
+        }
+        
+        if (hasIncompleteIndicator || hasErrorPattern) {
+          console.warn(`[CLI] ⚠️ Exit code 0 but execution appears incomplete or failed`);
+          console.warn(`[CLI] Incomplete indicator: ${hasIncompleteIndicator}, Error pattern: ${hasErrorPattern}`);
+          return reject({
+            code: "INCOMPLETE_EXECUTION",
+            message: `Process exited with code 0 but execution appears incomplete or failed. Output: ${trimmedOutput.substring(0, 500)}`,
+            stdout: stdout,
+            stderr: stderr,
+          });
+        }
+        
+        if (outputTooShort && !hasSuccessIndicator) {
+          console.warn(`[CLI] ⚠️ Exit code 0 but output is suspiciously short (${trimmedOutput.length} chars) and no success indicator found`);
+          // For execution tasks, very short output without success indicators is suspicious
+          // But don't reject - some tasks might legitimately have minimal output
+          // Just log it for debugging
+        }
+        
+        if (hasSuccessIndicator) {
+          console.log(`[CLI] ✅ Success indicator found in output`);
+        }
+        
+        console.log(`[CLI] ✅ Execution completed successfully (exit code 0, output: ${trimmedOutput.length} chars)`);
         resolve({
           success: true,
           stdout: stdout.trim(),
@@ -409,6 +579,10 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
+      // Cleanup temp file if used
+      if (cleanupPromptFile) {
+        cleanupPromptFile();
+      }
       reject({
         code: "SPAWN_ERROR",
         message: error.message || "Failed to spawn process",
@@ -427,22 +601,46 @@ async function executeContinueCLI(prompt, projectPath, timeout = 300000) {
     // Note: LLM processing can take time, so ensure timeout is reasonable
     // Default is 5 minutes (300000ms), but complex tasks may need more
     timeoutId = setTimeout(() => {
+      timeoutOccurred = true;
+      console.warn(`[CLI] ⏱️ Timeout occurred after ${timeout}ms (${Math.floor(timeout / 1000)}s)`);
+      console.warn(`[CLI] Process completed: ${processCompleted}, killed: ${shellProcess.killed}`);
+      
+      // If process already completed, don't kill it
+      if (processCompleted) {
+        console.log(`[CLI] Process already completed, timeout occurred but execution finished`);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        return; // Let the exit handler deal with it
+      }
+      
       // Try to kill the process gracefully first
+      console.log(`[CLI] Attempting to kill process gracefully (SIGTERM)...`);
       shellProcess.kill("SIGTERM");
 
       // Give it a moment to exit gracefully
       setTimeout(() => {
-        if (!shellProcess.killed) {
+        if (!shellProcess.killed && !processCompleted) {
+          console.log(`[CLI] Process still running, force killing (SIGKILL)...`);
           shellProcess.kill("SIGKILL");
         }
-        reject({
-          code: "TIMEOUT",
-          message: `Execution timed out after ${timeout}ms (${Math.floor(
-            timeout / 1000
-          )}s)`,
-          stdout: stdout,
-          stderr: stderr,
-        });
+        // Cleanup temp file if used
+        if (cleanupPromptFile) {
+          cleanupPromptFile();
+        }
+        
+        // Only reject if process hasn't completed yet
+        if (!processCompleted) {
+          reject({
+            code: "TIMEOUT",
+            message: `Execution timed out after ${timeout}ms (${Math.floor(
+              timeout / 1000
+            )}s). The process was terminated.`,
+            stdout: stdout,
+            stderr: stderr,
+          });
+        }
       }, 2000);
     }, timeout);
   });

@@ -21,6 +21,15 @@ router.post("/generate-todos/:audioFileId", async (req, res) => {
       return res.status(404).json({ error: "Audio file not found" });
     }
 
+    // Debug: Log audio file and transcription details
+    console.log(`[GENERATE-TODOS] Audio file retrieved:`, {
+      audioFileId,
+      hasTranscription: !!audioFile.transcription_text,
+      transcriptionLength: audioFile.transcription_text?.length || 0,
+      transcriptionPreview: audioFile.transcription_text?.substring(0, 200) || "NO TRANSCRIPTION",
+      projectName: audioFile.project_name
+    });
+
     if (!audioFile.transcription_text) {
       return res
         .status(400)
@@ -46,6 +55,14 @@ router.post("/generate-todos/:audioFileId", async (req, res) => {
     // Build codebase context
     const projectPath = path.join(PROJECTS_DIR, projectName);
     const codebaseContext = await buildCodebaseContext(projectPath);
+
+    // Debug: Log codebase context details
+    console.log(`[GENERATE-TODOS] Building prompt with:`, {
+      transcriptionLength: audioFile.transcription_text?.length || 0,
+      codebaseContextFiles: codebaseContext.fileTree?.length || 0,
+      keyFilesCount: codebaseContext.keyFiles?.length || 0,
+      projectName: codebaseContext.projectName
+    });
 
     // Create prompt for Continue.dev
     // Note: This is a one-way communication with an agentic AI - generate todos directly without asking follow-up questions
@@ -77,6 +94,18 @@ Format each todo as JSON:
 
 Return only a JSON array of todos.`;
 
+    // Debug: Log prompt details
+    console.log(`[GENERATE-TODOS] Prompt created:`, {
+      promptLength: prompt.length,
+      transcriptionIncluded: prompt.includes(audioFile.transcription_text || ""),
+      transcriptionStartIndex: prompt.indexOf("TRANSCRIPTION:"),
+      transcriptionEndIndex: prompt.indexOf("CODEBASE CONTEXT:"),
+      transcriptionPreview: prompt.substring(
+        prompt.indexOf("TRANSCRIPTION:") + "TRANSCRIPTION:".length,
+        prompt.indexOf("CODEBASE CONTEXT:")
+      ).substring(0, 200)
+    });
+
     // Execute Continue.dev CLI command directly
     console.log(`[GENERATE-TODOS] Executing Continue.dev CLI...`);
 
@@ -97,11 +126,14 @@ Return only a JSON array of todos.`;
       const result = await executeContinueCLI(prompt, projectPath, timeout);
       stdout = result.stdout || "";
 
-      // Check for authentication errors
+      // Check for authentication errors (more specific checks to avoid false positives)
       if (
         stdout.includes("x-api-key") ||
         stdout.includes("authentication_error") ||
-        stdout.includes("invalid")
+        stdout.includes("invalid api key") ||
+        stdout.includes("invalid_api_key") ||
+        stdout.includes("api key is invalid") ||
+        stdout.includes("authentication failed")
       ) {
         return res.status(401).json({
           error:
@@ -120,12 +152,15 @@ Return only a JSON array of todos.`;
         });
       }
 
-      // Check for authentication errors
+      // Check for authentication errors (more specific checks to avoid false positives)
       if (
         error.code === "AUTH_ERROR" ||
         errorOutput.includes("x-api-key") ||
         errorOutput.includes("authentication_error") ||
-        errorOutput.includes("invalid")
+        errorOutput.includes("invalid api key") ||
+        errorOutput.includes("invalid_api_key") ||
+        errorOutput.includes("api key is invalid") ||
+        errorOutput.includes("authentication failed")
       ) {
         return res.status(401).json({
           error:
@@ -139,11 +174,14 @@ Return only a JSON array of todos.`;
       });
     }
 
-    // Check stdout for authentication errors
+    // Check stdout for authentication errors (more specific checks to avoid false positives)
     if (
       stdout.includes("x-api-key") ||
       stdout.includes("authentication_error") ||
-      stdout.includes("invalid")
+      stdout.includes("invalid api key") ||
+      stdout.includes("invalid_api_key") ||
+      stdout.includes("api key is invalid") ||
+      stdout.includes("authentication failed")
     ) {
       return res.status(401).json({
         error:
