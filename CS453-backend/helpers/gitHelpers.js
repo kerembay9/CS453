@@ -54,6 +54,39 @@ async function createGitCheckpoint(projectPath) {
           console.warn(`[GIT-CHECKPOINT] Failed to configure git user (may already be configured):`, configError.message);
         }
         
+        // Create/update .gitignore to exclude cache files
+        const gitignorePath = path.join(projectPath, ".gitignore");
+        const gitignoreContent = `# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+`;
+        try {
+          if (!fs.existsSync(gitignorePath)) {
+            fs.writeFileSync(gitignorePath, gitignoreContent, "utf8");
+            console.log(`[GIT-CHECKPOINT] Created .gitignore file`);
+          }
+        } catch (gitignoreError) {
+          console.warn(`[GIT-CHECKPOINT] Failed to create .gitignore:`, gitignoreError.message);
+        }
+
         // Create initial commit with current files
         try {
           await execAsync("git add -A", { cwd: projectPath });
@@ -77,7 +110,40 @@ async function createGitCheckpoint(projectPath) {
     
     console.log(`[GIT-CHECKPOINT] Git directory found: ${gitDir}`);
 
-    // Stage all changes
+    // Ensure .gitignore exists to exclude cache files
+    const gitignorePath = path.join(projectPath, ".gitignore");
+    const gitignoreContent = `# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+`;
+    try {
+      if (!fs.existsSync(gitignorePath)) {
+        fs.writeFileSync(gitignorePath, gitignoreContent, "utf8");
+        console.log(`[GIT-CHECKPOINT] Created .gitignore file`);
+      }
+    } catch (gitignoreError) {
+      console.warn(`[GIT-CHECKPOINT] Failed to create/update .gitignore:`, gitignoreError.message);
+    }
+
+    // Stage all changes (gitignore will automatically exclude cache files)
     console.log(`[GIT-CHECKPOINT] Staging all changes...`);
     try {
       await execAsync("git add -A", { cwd: projectPath });
@@ -191,14 +257,26 @@ async function getGitDiff(projectPath, fromCommit = null) {
       return null;
     }
 
+    // Add new files with intent-to-add (git add -N) so they appear in diff
+    // This doesn't actually stage them, just makes them visible in diff
+    try {
+      await execAsync("git add -N .", { cwd: projectPath });
+      console.log(`[GIT-DIFF] Added new files with intent-to-add for diff visibility`);
+    } catch (addError) {
+      console.warn(`[GIT-DIFF] Failed to add new files with intent-to-add:`, addError.message);
+      // Continue anyway, might still get some diff
+    }
+
     // Get diff from commit to current state
+    // Exclude __pycache__, .pyc, .pyo files and other binary/cache files
     let diffCommand;
     if (fromCommit) {
       // Diff from specific commit to current working directory
-      diffCommand = `git diff ${fromCommit} -- .`;
+      // Use :(exclude) to exclude patterns
+      diffCommand = `git diff ${fromCommit} -- . ':(exclude)__pycache__/**' ':(exclude)**/*.pyc' ':(exclude)**/*.pyo'`;
     } else {
       // Diff from HEAD to current working directory (unstaged changes)
-      diffCommand = "git diff HEAD -- .";
+      diffCommand = `git diff HEAD -- . ':(exclude)__pycache__/**' ':(exclude)**/*.pyc' ':(exclude)**/*.pyo'`;
     }
 
     console.log(`[GIT-DIFF] Running: ${diffCommand}`);
@@ -221,7 +299,7 @@ async function getGitDiff(projectPath, fromCommit = null) {
     if (fromCommit) {
       try {
         console.log(`[GIT-DIFF] Trying unstaged changes instead...`);
-        const { stdout: diffStdout } = await execAsync("git diff -- .", {
+        const { stdout: diffStdout } = await execAsync(`git diff -- . ':(exclude)__pycache__/**' ':(exclude)**/*.pyc' ':(exclude)**/*.pyo'`, {
           cwd: projectPath,
           maxBuffer: 10 * 1024 * 1024,
         });
